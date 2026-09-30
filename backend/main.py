@@ -34,10 +34,12 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import html
+import io
 import httpx
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -438,6 +440,8 @@ try:
 except ValueError:
     _MAX_BODY = 25 * 1024 * 1024
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+_UI_PAGES = {"/", "/index.html", "/panel"}
+_BROWSER_ONLY_PREFIXES = ("/api/", "/tiles/")   # solo la propia página (fetch same-origin) las usa   # únicas rutas abribles desde un enlace de otra web
 
 
 def _hostname(hostport: str) -> str:
@@ -478,6 +482,10 @@ class LocalGuard:
         if scope["type"] not in ("http", "websocket"):
             return await self.app(scope, receive, send)
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        path = scope.get("path", "")
+        root = scope.get("root_path", "").rstrip("/")
+        if root and (path == root or path.startswith(root + "/")):
+            path = path[len(root):] or "/"   # ruta efectiva (como Starlette: solo en límite de segmento)
         status, reason = 0, ""
         if _hostname(headers.get("host", "")) not in _ALLOWED_HOSTS:
             status, reason = 403, "host no permitido"
@@ -485,9 +493,27 @@ class LocalGuard:
                 and not _origin_ok(headers.get("origin", ""), headers.get("host", "")):
             status, reason = 403, "origen no permitido"
         elif headers.get("sec-fetch-site") in ("cross-site", "same-site") and not (
-                headers.get("sec-fetch-mode") == "navigate" and headers.get("sec-fetch-dest") == "document"):
+                headers.get("sec-fetch-mode") == "navigate" and headers.get("sec-fetch-dest") == "document"
+                and path in _UI_PAGES):
             # Otra web no puede disparar peticiones (ni GET: <img src=/tiles/...> gastaría tus APIs de pago).
-            # Se permite solo abrir la app desde un enlace. Google Earth no envía Sec-Fetch-*.
+            # Desde un enlace externo solo se puede ABRIR la app, no navegar a /api o /tiles.
+            # Google Earth no envía Sec-Fetch-*.
+            status, reason = 403, "petición cross-site no permitida"
+        elif scope["type"] == "http" and path == "/flights.kml" \
+                and headers.get("sec-fetch-site") not in ("same-origin", "none") \
+                and not ("sec-fetch-site" not in headers and "googleearth" in headers.get("user-agent", "").lower()):
+            # /flights.kml activa las consultas a OpenSky: solo la propia página o Google Earth
+            # (su User-Agent contiene "GoogleEarth"; una web no puede falsificar el User-Agent del navegador).
+            status, reason = 403, "solo Google Earth o la propia página"
+        elif scope["type"] == "http" and path.startswith(_BROWSER_ONLY_PREFIXES) \
+                and headers.get("sec-fetch-site") not in ("same-origin", "none"):
+            # La API y los tiles solo los usa la propia página: exigir Sec-Fetch-Site same-origin
+            # (o "none" = URL escrita por ti). Un navegador sin Fetch Metadata + referrerpolicy=no-referrer
+            # ya no puede gastar tus APIs de pago. Google Earth usa solo /earth.kml y /flights.kml.
+            status, reason = 403, "petición sin origen propio verificable"
+        elif "sec-fetch-site" not in headers and headers.get("referer") \
+                and urlsplit(headers["referer"]).netloc.lower() != headers.get("host", "").strip().lower():
+            # Navegadores antiguos sin Fetch Metadata: un Referer de otra web delata una petición cross-site.
             status, reason = 403, "petición cross-site no permitida"
         elif scope["type"] == "http":
             try:
@@ -734,6 +760,18 @@ async def api_keys_get() -> JSONResponse:
     return JSONResponse({"keys": [_key_view(*k) for k in KEY_DEFS]})
 
 
+def _env_line(k: str, v: str) -> str | None:
+    """Línea `K=V` que python-dotenv relee como exactamente `v` (p. ej. un '#' no se vuelve comentario).
+       Sin comillas si ya es seguro; si no, entre comillas simples. None si no hay forma segura."""
+    for line in (f"{k}={v}", "{}='{}'".format(k, v.replace("\\", "\\\\").replace("'", "\\'"))):
+        try:
+            if dotenv_values(stream=io.StringIO(line + "\n"), interpolate=False).get(k) == v:
+                return line
+        except Exception:
+            pass
+    return None
+
+
 def _bad_key_value(k: str, v: str) -> str | None:
     if re.search(r"[\x00-\x1f\x7f\x85\u2028\u2029]", v):   # todo lo que splitlines() partiría
         return f"{k}: no puede contener saltos de línea"
@@ -754,6 +792,11 @@ async def api_keys_set(payload: dict) -> JSONResponse:
         err = _bad_key_value(k, v)
         if err:
             return JSONResponse({"ok": False, "error": err}, status_code=400)
+    lines_new = {k: _env_line(k, v) for k, v in updates.items()}
+    bad = sorted(k for k, ln in lines_new.items() if ln is None)
+    if bad:
+        return JSONResponse({"ok": False, "error": f"{', '.join(bad)}: valor no representable en .env"},
+                            status_code=400)
     # Reescribe el .env preservando comentarios y otras variables
     lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
     seen: set[str] = set()
@@ -762,16 +805,26 @@ async def api_keys_set(payload: dict) -> JSONResponse:
         st = ln.strip()
         if st and not st.startswith("#") and "=" in st:
             k = st.split("=", 1)[0].strip()
+            if k.startswith("export ") or k.startswith("export\t"):
+                k = k[7:].strip()   # `export K=v` también es una asignación para python-dotenv
             if k in updates:
-                out.append(f"{k}={updates[k]}")
+                out.append(lines_new[k])
                 seen.add(k)
                 continue
         out.append(ln)
     for k, v in updates.items():
         if k not in seen:
-            out.append(f"{k}={v}")
+            out.append(lines_new[k])
+    text = "\n".join(out) + "\n"
+    # Antes de escribir: el .env resultante debe releerse con EXACTAMENTE los valores guardados
+    # (ninguna otra línea duplicada/posterior puede pisarlos al reiniciar).
+    parsed = dotenv_values(stream=io.StringIO(text), interpolate=False)
+    wrong = sorted(k for k, v in updates.items() if parsed.get(k) != v)
+    if wrong:
+        return JSONResponse({"ok": False, "error": f"{', '.join(wrong)}: otra línea del .env lo pisaría; "
+                             "edita el archivo a mano"}, status_code=409)
     try:
-        ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
+        ENV_PATH.write_text(text, encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status_code=500)
     for k, v in updates.items():

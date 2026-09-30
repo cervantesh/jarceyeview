@@ -149,10 +149,22 @@ Recomendaciones:
 - Pon **cuotas o límites de gasto** a las claves de pago (Google, OpenAI) y configura solo las que uses.
 - La ubicación por IP (respaldo si el navegador no la da) consulta `ipapi.co` por HTTPS;
   desactívala con `GEOIP_LOOKUP=0`.
-- **AviationStack** (plan gratuito) solo funciona por HTTP: su clave viaja sin cifrar. Úsala solo en
-  redes de confianza o no la configures.
+- **AviationStack** se consulta por HTTPS (planes de pago). El plan gratuito solo admite HTTP, donde
+  la clave viaja sin cifrar: está desactivado salvo que pongas `AVIATIONSTACK_ALLOW_HTTP=1`
+  (hazlo solo en redes de confianza).
+- Desde un enlace de otra web solo se puede abrir la app (`/`, `/panel`), no las rutas `/api` ni `/tiles`.
+- `/api` y `/tiles` solo responden a la propia página (cabecera `Sec-Fetch-Site`). Requiere un navegador
+  actual (Chrome/Edge 76+, Firefox 90+, Safari 16.4+). `/flights.kml` responde además a Google Earth
+  (reconocido por su `User-Agent`).
 - Otra web abierta en tu navegador no puede hacer peticiones a la app (se bloquean las peticiones
   *cross-site*, también los GET que gastarían cuota de tus APIs de pago).
+
+Riesgos residuales conocidos (bajos):
+
+- Con `AVIATIONSTACK_ALLOW_HTTP=1` la clave de AviationStack viaja sin cifrar.
+- Las miniaturas de webcams (Windy) se cargan desde URLs externas: el navegador hace esas peticiones
+  y los servidores de las imágenes ven tu IP.
+- La clave de Google Maps y el token de Cesium son visibles para la propia página (restríngelos).
 
 ## 2. Instalación
 

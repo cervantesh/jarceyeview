@@ -52,7 +52,41 @@ _OVERPASS_EPS = [
     "https://overpass.private.coffee/api/interpreter",
     "https://overpass.osm.jp/api/interpreter",
 ]
-_overpass_cache: dict[str, tuple[float, list]] = {}
+_overpass_cache: dict[str, tuple[float, list, int]] = {}   # key -> (t, elementos, bytes)
+_ov_mem_bytes = 0
+_OVERPASS_MAX_RESP_BYTES = 32 * 1024 * 1024   # respuesta de red máxima (se corta antes de parsear)
+_OVERPASS_MAX_MEM_BYTES = 64 * 1024 * 1024    # presupuesto total de la caché en memoria
+
+
+async def _fetch_limited(method: str, url: str, limit: int, **kw) -> tuple[int, bytes | None]:
+    """Descarga en streaming y aborta si el cuerpo supera `limit` bytes (no se parsea nada gigante)."""
+    headers = {**kw.pop("headers", {}), "Accept-Encoding": "identity"}   # pedir el cuerpo sin comprimir
+    async with _http.stream(method, url, headers=headers, **kw) as r:
+        if r.status_code != 200:
+            return r.status_code, None
+        if r.headers.get("content-encoding", "identity").strip().lower() not in ("", "identity"):
+            return r.status_code, None   # comprimido pese a pedir identity: no se descomprime a ciegas
+        buf = bytearray()
+        async for chunk in r.aiter_raw():
+            if len(buf) + len(chunk) > limit:
+                return r.status_code, None
+            buf += chunk
+        return r.status_code, bytes(buf)
+
+
+def _ov_mem_put(key: str, now: float, els: list) -> None:
+    global _ov_mem_bytes
+    size = len(json.dumps(els))
+    if size > _OVERPASS_MAX_FILE_BYTES:
+        return
+    if len(_overpass_cache) >= 200 or _ov_mem_bytes + size > _OVERPASS_MAX_MEM_BYTES:
+        _overpass_cache.clear()
+        _ov_mem_bytes = 0
+    old = _overpass_cache.get(key)
+    if old:
+        _ov_mem_bytes -= old[2]
+    _overpass_cache[key] = (now, els, size)
+    _ov_mem_bytes += size
 # Caché EN DISCO: las calles no cambian; una vez traídas se reutilizan mucho tiempo,
 # evitando re-consultar Overpass y disparar su rate-limit.
 _OVERPASS_DIR = Path(__file__).resolve().parent.parent / ".cache" / "overpass"
@@ -66,33 +100,44 @@ def _ov_disk_path(query: str) -> Path:
 def _ov_disk_read(query: str) -> list | None:
     try:
         p = _ov_disk_path(query)
-        if p.exists() and (time.time() - p.stat().st_mtime) < _OVERPASS_TTL_DISK:
+        if p.exists() and (time.time() - p.stat().st_mtime) < _OVERPASS_TTL_DISK \
+                and p.stat().st_size <= _OVERPASS_MAX_FILE_BYTES:
             return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         pass
     return None
 
 
-_OVERPASS_MAX_FILES = 2000   # tope de la caché en disco (borra los más viejos)
+_OVERPASS_MAX_FILES = 500                    # tope de archivos en la caché en disco
+_OVERPASS_MAX_FILE_BYTES = 8 * 1024 * 1024    # una respuesta más grande no se guarda en disco
+_OVERPASS_MAX_DIR_BYTES = 300 * 1024 * 1024   # presupuesto total de la caché en disco
+_OVERPASS_MAX_ELEMENTS = 20000                # tope de vías por respuesta (memoria/disco)
 
 
 def _ov_disk_write(query: str, els: list) -> None:
     try:
         _OVERPASS_DIR.mkdir(parents=True, exist_ok=True)
+        data = json.dumps(els)
+        if len(data) > _OVERPASS_MAX_FILE_BYTES:
+            return
         files = sorted(_OVERPASS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime)
-        for f in files[:max(0, len(files) - _OVERPASS_MAX_FILES + 1)]:
-            f.unlink(missing_ok=True)
-        _ov_disk_path(query).write_text(json.dumps(els), encoding="utf-8")
+        total = sum(f.stat().st_size for f in files) + len(data)
+        while files and (len(files) >= _OVERPASS_MAX_FILES or total > _OVERPASS_MAX_DIR_BYTES):
+            old = files.pop(0)   # el más viejo primero
+            total -= old.stat().st_size
+            old.unlink(missing_ok=True)
+        _ov_disk_path(query).write_text(data, encoding="utf-8")
     except Exception:
         pass
 
 
 async def _overpass_one(ep: str, query: str, timeout: float) -> list | None:
     try:
-        r = await _http.post(ep, data={"data": query}, timeout=timeout)
-        if r.status_code != 200:
+        _st, body = await _fetch_limited("POST", ep, _OVERPASS_MAX_RESP_BYTES, data={"data": query},
+                                         timeout=timeout)
+        if body is None:
             return None
-        els = [e for e in (r.json().get("elements") or [])
+        els = [e for e in (json.loads(body).get("elements") or [])
                if e.get("geometry") and len(e["geometry"]) > 1]
         return els or None
     except Exception:
@@ -115,11 +160,12 @@ async def _osm_api_roads(query: str) -> list:
         return []
     s, w, n, e = (float(x) for x in m.groups())
     try:
-        r = await _http.get("https://api.openstreetmap.org/api/0.6/map",
-                            params={"bbox": f"{w},{s},{e},{n}"}, timeout=25)
-        if r.status_code != 200:
+        _st, body = await _fetch_limited("GET", "https://api.openstreetmap.org/api/0.6/map",
+                                         _OVERPASS_MAX_RESP_BYTES, params={"bbox": f"{w},{s},{e},{n}"},
+                                         timeout=25)
+        if body is None:
             return []
-        root = ET.fromstring(r.text)
+        root = ET.fromstring(body)
     except Exception:
         return []
     nodes: dict = {}
@@ -154,14 +200,14 @@ async def overpass_query(query: str, key: str = "") -> list:
         return []
     now = time.monotonic()
     if key and key in _overpass_cache:
-        t, els = _overpass_cache[key]
+        t, els, _size = _overpass_cache[key]
         if now - t < 300:
             return els
     # Caché en disco (por contenido de la consulta): sobrevive reinicios y evita rate-limit.
     disk = _ov_disk_read(query)
     if disk:
         if key:
-            _overpass_cache[key] = (now, disk)
+            _ov_mem_put(key, now, disk)
         return disk
     local = os.getenv("OVERPASS_URL", "").strip()
     result: list = []
@@ -182,11 +228,12 @@ async def overpass_query(query: str, key: str = "") -> list:
             _ov_fail += 1
             if _ov_fail >= 2:                    # 2 fallos → 5 min sin tocar los Overpass públicos
                 _ov_down_until = time.monotonic() + 300
+    result = result[:_OVERPASS_MAX_ELEMENTS]
     if result:
         _ov_fail = 0
         _ov_down_until = 0.0
         if key:
-            _overpass_cache[key] = (now, result)
+            _ov_mem_put(key, now, result)
         _ov_disk_write(query, result)
     return result
 
@@ -302,8 +349,11 @@ async def flight_status(callsign: str) -> dict | None:
         return hit[1]
     result = None
     try:
+        # El plan gratuito solo admite HTTP y la clave viajaría sin cifrar: por defecto HTTPS
+        # (planes de pago). AVIATIONSTACK_ALLOW_HTTP=1 acepta HTTP bajo tu responsabilidad.
+        http_ok = os.getenv("AVIATIONSTACK_ALLOW_HTTP", "").strip().lower() in ("1", "true", "yes", "on")
         r = await _http.get(
-            "http://api.aviationstack.com/v1/flights",
+            ("http" if http_ok else "https") + "://api.aviationstack.com/v1/flights",
             params={"access_key": key, "flight_icao": cs},
         )
         data = (r.json() or {}).get("data") or []
@@ -323,6 +373,8 @@ async def flight_status(callsign: str) -> dict | None:
             }
     except Exception:
         result = None
+    if len(_status_cache) > 1000:
+        _status_cache.clear()
     _status_cache[cs] = (now, result)
     return result
 
@@ -1444,8 +1496,12 @@ async def rain_radar() -> dict:
         d = (await _http.get("https://api.rainviewer.com/public/weather-maps.json")).json()
         host = d.get("host")
         past = (d.get("radar") or {}).get("past") or []
-        if host and past:
-            return {"url": f"{host}{past[-1]['path']}/256/{{z}}/{{x}}/{{y}}/2/1_1.png"}
+        path = str((past[-1] or {}).get("path", "")) if past else ""
+        # host/path vienen de un tercero y acaban en una plantilla de tiles: solo RainViewer por HTTPS
+        # (si no, podría apuntar a /tiles/gmap de esta app y gastar tu cuota de Google).
+        if re.fullmatch(r"https://([a-z0-9-]+\.)*rainviewer\.com", str(host or "")) \
+                and re.fullmatch(r"/[A-Za-z0-9_/-]{1,100}", path):
+            return {"url": f"{host}{path}/256/{{z}}/{{x}}/{{y}}/2/1_1.png"}
     except Exception:
         pass
     return {}
@@ -1593,6 +1649,8 @@ class RouteService:
                         result = {"origin": origin, "dest": dest, "airline": airline}
         except Exception:
             result = None
+        if len(self._cache) > 5000:
+            self._cache.clear()
         self._cache[cs] = result
         return result
 
