@@ -1496,8 +1496,12 @@ async def rain_radar() -> dict:
         d = (await _http.get("https://api.rainviewer.com/public/weather-maps.json")).json()
         host = d.get("host")
         past = (d.get("radar") or {}).get("past") or []
-        if host and past:
-            return {"url": f"{host}{past[-1]['path']}/256/{{z}}/{{x}}/{{y}}/2/1_1.png"}
+        path = str((past[-1] or {}).get("path", "")) if past else ""
+        # host/path vienen de un tercero y acaban en una plantilla de tiles: solo RainViewer por HTTPS
+        # (si no, podría apuntar a /tiles/gmap de esta app y gastar tu cuota de Google).
+        if re.fullmatch(r"https://([a-z0-9-]+\.)*rainviewer\.com", str(host or "")) \
+                and re.fullmatch(r"/[A-Za-z0-9_/-]{1,100}", path):
+            return {"url": f"{host}{path}/256/{{z}}/{{x}}/{{y}}/2/1_1.png"}
     except Exception:
         pass
     return {}

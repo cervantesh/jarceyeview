@@ -159,6 +159,13 @@ Recomendaciones:
 - Otra web abierta en tu navegador no puede hacer peticiones a la app (se bloquean las peticiones
   *cross-site*, también los GET que gastarían cuota de tus APIs de pago).
 
+Riesgos residuales conocidos (bajos):
+
+- Con `AVIATIONSTACK_ALLOW_HTTP=1` la clave de AviationStack viaja sin cifrar.
+- Las miniaturas de webcams (Windy) se cargan desde URLs externas: el navegador hace esas peticiones
+  y los servidores de las imágenes ven tu IP.
+- La clave de Google Maps y el token de Cesium son visibles para la propia página (restríngelos).
+
 ## 2. Instalación
 
 ```powershell
