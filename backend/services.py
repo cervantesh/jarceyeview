@@ -25,7 +25,21 @@ from pathlib import Path
 import httpx
 
 # Cliente HTTP compartido (async).
-_http = httpx.AsyncClient(timeout=15, headers={"User-Agent": "JarcsEyeView/1.0"})
+_MAX_UPSTREAM_BYTES = 32 * 1024 * 1024
+
+
+async def _reject_huge(resp: httpx.Response) -> None:
+    """Una API externa (comprometida) no puede tumbar el proceso con una respuesta gigante declarada."""
+    try:
+        if int(resp.headers.get("content-length", "0") or 0) > _MAX_UPSTREAM_BYTES:
+            await resp.aclose()
+            raise httpx.HTTPError(f"respuesta demasiado grande de {resp.url.host}")
+    except ValueError:
+        pass
+
+
+_http = httpx.AsyncClient(timeout=15, headers={"User-Agent": "JarcsEyeView/1.0"},
+                          event_hooks={"response": [_reject_huge]})
 
 
 async def aclose() -> None:
@@ -1169,6 +1183,7 @@ async def voice_intent(text: str) -> dict | None:
         "messages": [{"role": "system", "content": VOICE_SYSTEM},
                      {"role": "user", "content": text}],
     }
+    key = os.getenv("OPENAI_API_KEY", "")
     try:
         r = await _http.post("https://api.openai.com/v1/chat/completions",
                              headers={"Authorization": f"Bearer {key}"},

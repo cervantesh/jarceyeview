@@ -499,12 +499,14 @@ class LocalGuard:
             # Desde un enlace externo solo se puede ABRIR la app, no navegar a /api o /tiles.
             # Google Earth no envía Sec-Fetch-*.
             status, reason = 403, "petición cross-site no permitida"
-        elif scope["type"] == "http" and path == "/flights.kml" \
-                and headers.get("sec-fetch-site") not in ("same-origin", "none") \
-                and not ("sec-fetch-site" not in headers and "googleearth" in headers.get("user-agent", "").lower()):
-            # /flights.kml activa las consultas a OpenSky: solo la propia página o Google Earth
-            # (su User-Agent contiene "GoogleEarth"; una web no puede falsificar el User-Agent del navegador).
-            status, reason = 403, "solo Google Earth o la propia página"
+        elif scope["type"] == "http" and path == "/flights.kml" and not (
+                ("sec-fetch-site" not in headers and "googleearth" in headers.get("user-agent", "").lower())
+                or (headers.get("sec-fetch-site") in ("same-origin", "none")
+                    and headers.get("sec-fetch-mode") == "navigate" and headers.get("sec-fetch-dest") == "document")):
+            # /flights.kml cambia estado (bbox + activa las consultas a OpenSky) y la página nunca lo pide:
+            # solo Google Earth (User-Agent "GoogleEarth", que una web no puede falsificar) o abrirlo tú a mano.
+            # Nunca como <img>/<audio>/fetch, ni siquiera tras una redirección que acabe en esta app.
+            status, reason = 403, "solo Google Earth"
         elif scope["type"] == "http" and path.startswith(_BROWSER_ONLY_PREFIXES) \
                 and headers.get("sec-fetch-site") not in ("same-origin", "none"):
             # La API y los tiles solo los usa la propia página: exigir Sec-Fetch-Site same-origin

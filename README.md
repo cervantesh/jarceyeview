@@ -165,6 +165,8 @@ Riesgos residuales conocidos (bajos):
 - Las miniaturas de webcams (Windy) se cargan desde URLs externas: el navegador hace esas peticiones
   y los servidores de las imágenes ven tu IP.
 - La clave de Google Maps y el token de Cesium son visibles para la propia página (restríngelos).
+- El script de Google Maps (2D / Street View) se carga sin SRI porque Google no publica hashes; se
+  confía en su HTTPS.
 
 ## 2. Instalación
 
@@ -179,7 +181,7 @@ copy .env.example .env      # edita .env con tus claves
 ## 3. Ejecutar
 
 ```powershell
-py -m uvicorn backend.main:app --reload --port 8000
+py -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers --reload
 ```
 
 Hay **dos formas** de ver el globo:
