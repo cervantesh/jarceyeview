@@ -1169,6 +1169,7 @@ async def voice_intent(text: str) -> dict | None:
         "messages": [{"role": "system", "content": VOICE_SYSTEM},
                      {"role": "user", "content": text}],
     }
+    key = os.getenv("OPENAI_API_KEY", "")
     try:
         r = await _http.post("https://api.openai.com/v1/chat/completions",
                              headers={"Authorization": f"Bearer {key}"},
