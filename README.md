@@ -89,8 +89,10 @@ arranca sin ninguna clave (globo base de Cesium, aviones anónimos, IA local, et
 ## 1.1 Claves y tokens — dónde conseguir cada uno
 
 Todas las claves se leen de variables de entorno (`.env`) o se editan desde el panel
-(**<http://localhost:8000/panel>** → gestor de API keys). **Ninguna clave sale al navegador**:
-el backend hace de proxy. Las marcadas *(reinicio)* requieren reiniciar el servidor tras cambiarlas.
+(**<http://localhost:8000/panel>** → gestor de API keys). El backend hace de proxy y el gestor
+**nunca devuelve el valor de una clave secreta** (solo si está configurada). Excepción: la clave de
+**Google Maps** y el token de **Cesium** sí llegan al navegador porque el globo los usa en el cliente
+— restríngelos (ver [Seguridad](#seguridad)). Las marcadas *(reinicio)* requieren reiniciar el servidor tras cambiarlas.
 
 | Servicio | Variable(s) | Para qué | Dónde obtenerla |
 |---|---|---|---|
@@ -122,6 +124,35 @@ No necesitan API key; son servicios que corren en tu equipo. Configúralos por h
 OpenSky anónimo (aviones), adsbdb (rutas), OpenStreetMap/Overpass/Nominatim (calles),
 Radio Browser (radios), USGS (terremotos), wheretheiss.at (ISS), RainViewer (lluvia),
 ArcGIS/OSM (mapas base) e ip-api.com (ubicación por IP).
+
+## Seguridad
+
+La app está pensada para correr **solo en tu equipo**. Protecciones incluidas:
+
+- El servidor escucha en `127.0.0.1` y solo acepta `Host` locales (`localhost`, `127.0.0.1`, `[::1]`),
+  lo que bloquea ataques de *DNS rebinding*. Si necesitas otro nombre, añádelo en `ALLOWED_HOSTS`
+  (nombres de host sin puerto, separados por comas). Detrás de un proxy inverso, el proxy debe
+  conservar la cabecera `Host` original (p. ej. `proxy_set_header Host $host;` en nginx).
+- El WebSocket y toda petición que modifica estado exigen un `Origin` local: otra web abierta en tu
+  navegador no puede controlar la app ni leer sus datos.
+- El gestor de claves no devuelve secretos, rechaza saltos de línea y valida los `*_HOST` como URL http(s).
+- Todo texto de fuentes externas (radios, OSM, webcams, barcos, IA…) se escapa antes de pintarse.
+- Tope de tamaño de petición (`MAX_BODY_MB`, 25 por defecto) y límites en la generación de imágenes.
+- CesiumJS se carga con *Subresource Integrity* y las dependencias de Python están fijadas a versiones exactas.
+
+Recomendaciones:
+
+- **No expongas el servidor** a la red (`--host 0.0.0.0`) ni con túneles (ngrok, Cloudflare Tunnel…):
+  no tiene autenticación de usuarios.
+- **Restringe la clave de Google** en Google Cloud Console: *Restricciones de aplicación → Sitios web*
+  `http://localhost:8000/*`, y *Restricciones de API* solo a Map Tiles API / Maps JavaScript API.
+- Pon **cuotas o límites de gasto** a las claves de pago (Google, OpenAI) y configura solo las que uses.
+- La ubicación por IP (respaldo si el navegador no la da) consulta `ipapi.co` por HTTPS;
+  desactívala con `GEOIP_LOOKUP=0`.
+- **AviationStack** (plan gratuito) solo funciona por HTTP: su clave viaja sin cifrar. Úsala solo en
+  redes de confianza o no la configures.
+- Otra web abierta en tu navegador no puede hacer peticiones a la app (se bloquean las peticiones
+  *cross-site*, también los GET que gastarían cuota de tus APIs de pago).
 
 ## 2. Instalación
 

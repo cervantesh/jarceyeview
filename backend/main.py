@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -37,7 +38,7 @@ from pathlib import Path
 import html
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -52,7 +53,7 @@ from services import (OpenSky, RouteService, Telegram, aclose, ai_chat, ai_healt
                       rain_radar, revgeo, sd_host, tomtom_tile, traffic_incidents,
                       voice_intent, webcams)
 
-load_dotenv()
+load_dotenv(interpolate=False)   # sin expansión ${VAR}: un valor no puede copiar otro secreto
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "12"))  # 12s: el frontend interpola entre consultas; ahorra cuota OpenSky
@@ -61,6 +62,11 @@ THRESHOLDS = [30, 20, 15, 10, 5]  # minutos antes de aterrizar
 
 opensky = OpenSky()
 routes = RouteService()
+
+
+def _h(v) -> str:
+    """Escapa datos externos para mensajes de Telegram (parse_mode=HTML) y para KML/HTML."""
+    return html.escape(str(v if v is not None else ""), quote=True)
 telegram = Telegram()
 
 
@@ -204,8 +210,8 @@ async def check_emergencies(aircraft: list[dict]) -> None:
                 meaning = {"7500": "secuestro", "7600": "fallo de radio",
                            "7700": "emergencia general"}.get(a["squawk"], "emergencia")
                 await telegram.send(
-                    f"🚨 <b>EMERGENCIA</b> — squawk {a['squawk']} ({meaning})\n"
-                    f"Vuelo <b>{a['name']}</b> ({a['country']})\n"
+                    f"🚨 <b>EMERGENCIA</b> — squawk {_h(a['squawk'])} ({meaning})\n"
+                    f"Vuelo <b>{_h(a['name'])}</b> ({_h(a['country'])})\n"
                     f"Pos: {a['lat']:.3f}, {a['lon']:.3f} · alt {round(a['alt'])} m"
                 )
     world.emergencies = current  # olvida los que ya no están en emergencia
@@ -312,7 +318,7 @@ def _fs_summary(fs: dict | None) -> str:
         parts.append(f"est. {est}")
     if fs.get("arr_delay"):
         parts.append(f"⏰ {fs['arr_delay']} min retraso")
-    return ("\n" + " · ".join(parts)) if parts else ""
+    return ("\n" + _h(" · ".join(parts))) if parts else ""
 
 
 async def _notify_track(t: Track, text: str) -> None:
@@ -333,9 +339,9 @@ async def tracker() -> None:
                 t.origin, t.dest = r.get("origin"), r.get("dest")
             t.fs = await flight_status(t.callsign)
             t.resolved = True
-            org = t.origin["name"] if t.origin else "¿?"
-            dst = t.dest["name"] if t.dest else "¿?"
-            msg = f"🛰️ Rastreando <b>{t.callsign}</b>\nRuta: {org} → {dst}"
+            org = _h(t.origin["name"]) if t.origin else "¿?"
+            dst = _h(t.dest["name"]) if t.dest else "¿?"
+            msg = f"🛰️ Rastreando <b>{_h(t.callsign)}</b>\nRuta: {org} → {dst}"
             if not t.dest:
                 msg += "\n⚠️ Destino desconocido: avisaré solo del aterrizaje."
             msg += _fs_summary(t.fs)
@@ -353,7 +359,7 @@ async def tracker() -> None:
             if t.lost >= 3 and t.inited and "landed" not in t.fired:
                 t.fired.add("landed")
                 t.done = True
-                await telegram.send(f"🛬 <b>{t.callsign}</b> desapareció del radar cerca del destino. Probable aterrizaje.")
+                await telegram.send(f"🛬 <b>{_h(t.callsign)}</b> desapareció del radar cerca del destino. Probable aterrizaje.")
             await broadcast({"type": "track", "callsign": t.callsign, "phase": "lost",
                              "message": "sin señal", "fired": sorted(t.fired)})
             await asyncio.sleep(POLL_INTERVAL)
@@ -378,8 +384,8 @@ async def tracker() -> None:
             t.fired.add("landed")
             t.done = True
             t.fs = await flight_status(t.callsign) or t.fs  # refresca gate/hora final
-            await telegram.send(f"🛬 <b>{t.callsign}</b> ha aterrizado" +
-                                (f" en {t.dest['name']}." if t.dest else ".") + _fs_summary(t.fs))
+            await telegram.send(f"🛬 <b>{_h(t.callsign)}</b> ha aterrizado" +
+                                (f" en {_h(t.dest['name'])}." if t.dest else ".") + _fs_summary(t.fs))
 
         # Umbrales de tiempo restante
         if eta is not None:
@@ -387,8 +393,8 @@ async def tracker() -> None:
                 if eta <= th and str(th) not in t.fired:
                     t.fired.add(str(th))
                     await telegram.send(
-                        f"⏱️ <b>{t.callsign}</b>: ~{th} min para aterrizar"
-                        + (f" en {t.dest['name']}" if t.dest else "")
+                        f"⏱️ <b>{_h(t.callsign)}</b>: ~{th} min para aterrizar"
+                        + (f" en {_h(t.dest['name'])}" if t.dest else "")
                         + f"\nDistancia {dist:.0f} km · alt {round(a['alt'])} m · {a['speed']*3.6:.0f} km/h"
                     )
 
@@ -418,10 +424,110 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="JARC's EYE View", lifespan=lifespan)
 
 
+# --------------------------------------------------------------------------
+# Guardia de red local: Host / Origin / tamaño del cuerpo
+# --------------------------------------------------------------------------
+# El servidor es solo para esta máquina. Se valida:
+#  - Host:   solo localhost/127.0.0.1/[::1] (+ ALLOWED_HOSTS) -> bloquea DNS rebinding.
+#  - Origin: en WebSocket y en peticiones que cambian estado, solo desde esos mismos hosts
+#            -> otra web abierta en el navegador no puede usar la API ni el /ws.
+#  - Cuerpo: tope de MAX_BODY_MB (por defecto 25 MB) para no agotar memoria.
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
+try:
+    _MAX_BODY = int(float(os.getenv("MAX_BODY_MB") or 25) * 1024 * 1024)
+except ValueError:
+    _MAX_BODY = 25 * 1024 * 1024
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _hostname(hostport: str) -> str:
+    """'localhost:8000' -> 'localhost', '[::1]:8000' -> '[::1]'. Devuelve "" si el formato no es válido."""
+    hp = (hostport or "").strip().lower()
+    if hp.startswith("["):
+        end = hp.find("]")
+        if end < 0:
+            return ""
+        host, rest = hp[:end + 1], hp[end + 1:]
+        return host if rest == "" or re.fullmatch(r":\d{1,5}", rest) else ""
+    if hp.count(":") == 1:
+        host, port = hp.split(":")
+        return host if port.isdigit() else ""
+    return f"[{hp}]" if hp.count(":") > 1 else hp   # IPv6 sin corchetes (p. ej. ::1) -> [::1]
+
+
+# Entradas de ALLOWED_HOSTS: nombres de host (si traen puerto, se ignora).
+_ALLOWED_HOSTS = _LOCAL_HOSTS | {_hostname(h) for h in os.getenv("ALLOWED_HOSTS", "").split(",") if _hostname(h)}
+
+
+def _origin_ok(origin: str, host: str) -> bool:
+    if not origin:
+        return True   # sin Origin: herramientas locales (curl, Google Earth), no un navegador cross-site
+    scheme, _, rest = origin.partition("://")
+    # Mismo host Y mismo puerto que la petición: otra app en localhost:8188/8080/… no cuenta.
+    return scheme in ("http", "https") and rest.lower() == (host or "").strip().lower() \
+        and _hostname(rest) in _ALLOWED_HOSTS
+
+
+class LocalGuard:
+    """Middleware ASGI (cubre HTTP y WebSocket)."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        status, reason = 0, ""
+        if _hostname(headers.get("host", "")) not in _ALLOWED_HOSTS:
+            status, reason = 403, "host no permitido"
+        elif (scope["type"] == "websocket" or scope.get("method", "GET") not in _SAFE_METHODS) \
+                and not _origin_ok(headers.get("origin", ""), headers.get("host", "")):
+            status, reason = 403, "origen no permitido"
+        elif headers.get("sec-fetch-site") in ("cross-site", "same-site") and not (
+                headers.get("sec-fetch-mode") == "navigate" and headers.get("sec-fetch-dest") == "document"):
+            # Otra web no puede disparar peticiones (ni GET: <img src=/tiles/...> gastaría tus APIs de pago).
+            # Se permite solo abrir la app desde un enlace. Google Earth no envía Sec-Fetch-*.
+            status, reason = 403, "petición cross-site no permitida"
+        elif scope["type"] == "http":
+            try:
+                if int(headers.get("content-length", "0") or 0) > _MAX_BODY:
+                    status, reason = 413, "cuerpo demasiado grande"
+            except ValueError:
+                status, reason = 400, "content-length inválido"
+        if not status:
+            if scope["type"] != "http":
+                return await self.app(scope, receive, send)
+            total = 0
+
+            async def limited_receive():
+                nonlocal total
+                msg = await receive()
+                if msg.get("type") == "http.request":
+                    total += len(msg.get("body", b""))
+                    if total > _MAX_BODY:   # también para cuerpos chunked sin Content-Length
+                        raise HTTPException(status_code=413, detail="cuerpo demasiado grande")
+                return msg
+            return await self.app(scope, limited_receive, send)
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await JSONResponse({"error": reason}, status_code=status)(scope, receive, send)
+
+
+app.add_middleware(LocalGuard)
+
+
 @app.middleware("http")
 async def _no_cache_html(request, call_next):
     """El navegador no debe cachear el HTML/JS: así siempre carga la última versión del frontend."""
     resp = await call_next(request)
+    # Defensa en profundidad: sin sniffing de MIME, sin embebido en otras webs (clickjacking
+    # del gestor de claves) y sin filtrar la URL local como Referer a terceros.
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     ct = resp.headers.get("content-type", "")
     if "text/html" in ct or "javascript" in ct:
         resp.headers["Cache-Control"] = "no-store, must-revalidate"
@@ -509,10 +615,17 @@ async def api_enhance(payload: dict) -> JSONResponse:
 
 @app.post("/api/generate")
 async def api_generate(payload: dict) -> JSONResponse:
+    def _clamp(v, lo, hi, default):
+        try:
+            return max(lo, min(hi, int(v)))
+        except (TypeError, ValueError):
+            return default
+    steps = payload.get("steps")
     d = await generate_image(
-        payload.get("prompt", ""), payload.get("negative", ""),
-        payload.get("width", 768), payload.get("height", 768),
-        payload.get("steps"), payload.get("seed", -1), payload.get("image"))
+        str(payload.get("prompt", ""))[:2000], str(payload.get("negative", ""))[:2000],
+        _clamp(payload.get("width"), 64, 1536, 768), _clamp(payload.get("height"), 64, 1536, 768),
+        None if steps is None else _clamp(steps, 1, 60, 22),
+        _clamp(payload.get("seed"), -1, 2**32 - 1, -1), payload.get("image"))
     return JSONResponse(d or {"error": "generación no disponible"})
 
 
@@ -605,19 +718,42 @@ KEY_DEFS = [
 ]
 
 
+def _key_view(n: str, lbl: str, sec: bool, rst: bool) -> dict:
+    v = os.getenv(n, "")
+    d = {"name": n, "label": lbl, "secret": sec, "restart": rst, "set": bool(v)}
+    if sec:   # los secretos NUNCA salen del backend: solo si está puesta y sus 4 últimos caracteres
+        d["value"] = ""
+        d["hint"] = ("••••" + v[-4:]) if len(v) >= 12 else ("••••" if v else "")
+    else:
+        d["value"] = v
+    return d
+
+
 @app.get("/api/keys")
 async def api_keys_get() -> JSONResponse:
-    return JSONResponse({"keys": [
-        {"name": n, "label": lbl, "secret": sec, "restart": rst, "value": os.getenv(n, "")}
-        for (n, lbl, sec, rst) in KEY_DEFS]})
+    return JSONResponse({"keys": [_key_view(*k) for k in KEY_DEFS]})
+
+
+def _bad_key_value(k: str, v: str) -> str | None:
+    if re.search(r"[\x00-\x1f\x7f\x85\u2028\u2029]", v):   # todo lo que splitlines() partiría
+        return f"{k}: no puede contener saltos de línea"
+    if len(v) > 4096:
+        return f"{k}: demasiado largo"
+    if k.endswith("_HOST") and v and not re.fullmatch(r"https?://[A-Za-z0-9._\-\[\]:]+(/[A-Za-z0-9._~/-]*)?", v):
+        return f"{k}: debe ser una URL http(s)://host[:puerto]"
+    return None
 
 
 @app.post("/api/keys")
 async def api_keys_set(payload: dict) -> JSONResponse:
     known = {n: rst for (n, _l, _s, rst) in KEY_DEFS}
-    updates = {k: str(v) for k, v in (payload or {}).items() if k in known}
+    updates = {k: str(v).strip() for k, v in (payload or {}).items() if k in known}
     if not updates:
         return JSONResponse({"ok": False, "error": "sin claves válidas"}, status_code=400)
+    for k, v in updates.items():
+        err = _bad_key_value(k, v)
+        if err:
+            return JSONResponse({"ok": False, "error": err}, status_code=400)
     # Reescribe el .env preservando comentarios y otras variables
     lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
     seen: set[str] = set()
@@ -680,15 +816,15 @@ def _placemark(a: dict, cached_route: dict | None) -> str:
     if cached_route and (cached_route.get("origin") or cached_route.get("dest")):
         o = (cached_route.get("origin") or {}).get("icao", "¿?")
         d = (cached_route.get("dest") or {}).get("icao", "¿?")
-        route_html = f"<tr><td>Ruta</td><td>{o} → {d}</td></tr>"
+        route_html = f"<tr><td>Ruta</td><td>{_h(o)} → {_h(d)}</td></tr>"
     desc = (
         "<table>"
-        f"<tr><td>ICAO24</td><td>{a['id']}</td></tr>"
+        f"<tr><td>ICAO24</td><td>{_h(a['id'])}</td></tr>"
         f"<tr><td>País</td><td>{html.escape(a['country'])}</td></tr>"
         f"<tr><td>Altitud</td><td>{round(a['alt'])} m</td></tr>"
         f"<tr><td>Velocidad</td><td>{kmh:.0f} km/h</td></tr>"
         f"<tr><td>Rumbo</td><td>{round(a['heading'])}°</td></tr>"
-        f"<tr><td>Squawk</td><td>{a['squawk'] or '—'}</td></tr>"
+        f"<tr><td>Squawk</td><td>{_h(a['squawk'] or '—')}</td></tr>"
         f"{route_html}</table>"
     )
     return (
@@ -932,6 +1068,7 @@ PANEL_HTML = """<!doctype html><html lang="es"><head><meta charset="utf-8">
 
 <script>
 const $=(id)=>document.getElementById(id);
+const esc=(s)=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 async function track(){
   const cs=$("cs").value.trim(); if(!cs) return;
   const r=await (await fetch("/api/track",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -945,7 +1082,7 @@ async function poll(){
     const tg=s.telegram?"TG✓":"TG✗", au=s.openskyAuth?"OpenSky auth":"OpenSky anónimo";
     $("status").innerHTML=`<div class="kv"><span>Aviones a la vista</span><span>${s.aircraft}</span></div>`
       +`<div class="kv"><span>Fuentes</span><span>${au} · ${tg}</span></div>`
-      +(s.error?`<div class="kv"><span>Aviso</span><span style="color:#ff9aa2">${s.error}</span></div>`:"");
+      +(s.error?`<div class="kv"><span>Aviso</span><span style="color:#ff9aa2">${esc(s.error)}</span></div>`:"");
     if(s.track){
       const t=s.track, eta=t.eta_min!=null?t.eta_min.toFixed(0)+" min":"—",
         dist=t.dist_km!=null?t.dist_km.toFixed(0)+" km":"—",
@@ -953,8 +1090,8 @@ async function poll(){
       const chips=["30","20","15","10","5","landed"].map(k=>
         `<span class="th ${fired.has(k)?"done":""}">${k==="landed"?"🛬":k+"m"}</span>`).join("");
       $("track").innerHTML=`<hr style="border-color:#1f3d55">
-        <div class="kv"><span>Rastreando</span><span>${t.callsign}</span></div>
-        <div class="kv"><span>Ruta</span><span>${t.origin||"¿?"} → ${t.dest||"¿?"}</span></div>
+        <div class="kv"><span>Rastreando</span><span>${esc(t.callsign)}</span></div>
+        <div class="kv"><span>Ruta</span><span>${esc(t.origin||"¿?")} → ${esc(t.dest||"¿?")}</span></div>
         <div class="kv"><span>Distancia / ETA</span><span>${dist} · ${eta}</span></div>
         <div class="kv"><span>Fase</span><span>${t.phase==="landed"?"🛬 aterrizó":t.phase==="lost"?"sin señal":"en vuelo"}</span></div>
         <div style="margin-top:8px">${chips}</div>`;

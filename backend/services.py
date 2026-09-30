@@ -73,9 +73,15 @@ def _ov_disk_read(query: str) -> list | None:
     return None
 
 
+_OVERPASS_MAX_FILES = 2000   # tope de la caché en disco (borra los más viejos)
+
+
 def _ov_disk_write(query: str, els: list) -> None:
     try:
         _OVERPASS_DIR.mkdir(parents=True, exist_ok=True)
+        files = sorted(_OVERPASS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime)
+        for f in files[:max(0, len(files) - _OVERPASS_MAX_FILES + 1)]:
+            f.unlink(missing_ok=True)
         _ov_disk_path(query).write_text(json.dumps(els), encoding="utf-8")
     except Exception:
         pass
@@ -144,7 +150,7 @@ async def overpass_query(query: str, key: str = "") -> list:
        (5 min) + disco (30 días) y CIRCUIT BREAKER: si Overpass no responde varias veces seguidas,
        deja de consultarlo un rato (respuesta instantánea) para no colgar la app ni martillear."""
     global _ov_fail, _ov_down_until
-    if not (query or "").strip():
+    if not (query or "").strip() or len(query) > 4000:   # el frontend solo pide calles de un bbox
         return []
     now = time.monotonic()
     if key and key in _overpass_cache:
@@ -186,13 +192,16 @@ async def overpass_query(query: str, key: str = "") -> list:
 
 
 async def geoip() -> dict | None:
-    """Ubicación aproximada por IP pública (el backend corre en la máquina del usuario)."""
+    """Ubicación aproximada por IP pública (respaldo si el navegador no da geolocalización).
+       Por HTTPS (ipapi.co). Desactivable con GEOIP_LOOKUP=0: así no se consulta a terceros."""
+    if os.getenv("GEOIP_LOOKUP", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
     try:
-        r = await _http.get("http://ip-api.com/json/")
+        r = await _http.get("https://ipapi.co/json/", headers={"User-Agent": "jarceyeview"})
         d = r.json()
-        if d.get("status") == "success":
-            return {"lat": d["lat"], "lon": d["lon"],
-                    "city": d.get("city", ""), "country": d.get("country", "")}
+        if not d.get("error") and d.get("latitude") is not None:
+            return {"lat": d["latitude"], "lon": d["longitude"],
+                    "city": d.get("city", ""), "country": d.get("country_name", "")}
     except Exception:
         pass
     return None
@@ -223,6 +232,8 @@ async def reverse_country(lat: float, lon: float) -> str | None:
         cc = ((r.json().get("address") or {}).get("country_code") or "").upper() or None
     except Exception:
         cc = None
+    if len(_country_cache) > 2000:
+        _country_cache.clear()
     _country_cache[key] = cc
     return cc
 
@@ -1264,6 +1275,7 @@ async def analyze_scene(image: str, lat: float, lon: float) -> dict | None:
     if not _openai_ok():
         return {"error": "IA de visión local no respondió. Verifica que llama.cpp (Qwen3-VL) o un "
                          "modelo con visión en Ollama esté cargado y disponible."}
+    key = os.getenv("OPENAI_API_KEY", "")
     url = image if image.startswith("data:") else f"data:image/png;base64,{image}"
     body = {
         "model": "gpt-4o", "temperature": 0.4, "max_tokens": 1600,
@@ -1384,6 +1396,8 @@ async def traffic_incidents(s: float, w: float, n: float, e: float) -> list[dict
                         "to": p.get("to", ""), "roads": ", ".join(p.get("roadNumbers") or [])})
     except Exception:
         out = []
+    if len(_inc_cache) > 500:
+        _inc_cache.clear()
     _inc_cache[ck] = (now, out[:400])
     return _inc_cache[ck][1]
 
@@ -1418,6 +1432,8 @@ async def alpr_cameras(s: float, w: float, n: float, e: float) -> list[dict]:
                         "type": t.get("surveillance:type", "ALPR")})
     except Exception:
         out = []
+    if len(_alpr_cache) > 500:
+        _alpr_cache.clear()
     _alpr_cache[key] = (now, out)
     return out
 
