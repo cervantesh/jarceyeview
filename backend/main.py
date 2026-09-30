@@ -482,6 +482,10 @@ class LocalGuard:
         if scope["type"] not in ("http", "websocket"):
             return await self.app(scope, receive, send)
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        path = scope.get("path", "")
+        root = scope.get("root_path", "")
+        if root and path.startswith(root):
+            path = path[len(root):] or "/"   # ruta efectiva para el enrutado, también tras un proxy con prefijo
         status, reason = 0, ""
         if _hostname(headers.get("host", "")) not in _ALLOWED_HOSTS:
             status, reason = 403, "host no permitido"
@@ -490,12 +494,18 @@ class LocalGuard:
             status, reason = 403, "origen no permitido"
         elif headers.get("sec-fetch-site") in ("cross-site", "same-site") and not (
                 headers.get("sec-fetch-mode") == "navigate" and headers.get("sec-fetch-dest") == "document"
-                and scope.get("path", "") in _UI_PAGES):
+                and path in _UI_PAGES):
             # Otra web no puede disparar peticiones (ni GET: <img src=/tiles/...> gastaría tus APIs de pago).
             # Desde un enlace externo solo se puede ABRIR la app, no navegar a /api o /tiles.
             # Google Earth no envía Sec-Fetch-*.
             status, reason = 403, "petición cross-site no permitida"
-        elif scope["type"] == "http" and scope.get("path", "").startswith(_BROWSER_ONLY_PREFIXES) \
+        elif scope["type"] == "http" and path == "/flights.kml" \
+                and headers.get("sec-fetch-site") not in ("same-origin", "none") \
+                and not ("sec-fetch-site" not in headers and "googleearth" in headers.get("user-agent", "").lower()):
+            # /flights.kml activa las consultas a OpenSky: solo la propia página o Google Earth
+            # (su User-Agent contiene "GoogleEarth"; una web no puede falsificar el User-Agent del navegador).
+            status, reason = 403, "solo Google Earth o la propia página"
+        elif scope["type"] == "http" and path.startswith(_BROWSER_ONLY_PREFIXES) \
                 and headers.get("sec-fetch-site") not in ("same-origin", "none"):
             # La API y los tiles solo los usa la propia página: exigir Sec-Fetch-Site same-origin
             # (o "none" = URL escrita por ti). Un navegador sin Fetch Metadata + referrerpolicy=no-referrer

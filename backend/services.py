@@ -60,14 +60,17 @@ _OVERPASS_MAX_MEM_BYTES = 64 * 1024 * 1024    # presupuesto total de la caché e
 
 async def _fetch_limited(method: str, url: str, limit: int, **kw) -> tuple[int, bytes | None]:
     """Descarga en streaming y aborta si el cuerpo supera `limit` bytes (no se parsea nada gigante)."""
-    async with _http.stream(method, url, **kw) as r:
+    headers = {**kw.pop("headers", {}), "Accept-Encoding": "identity"}   # pedir el cuerpo sin comprimir
+    async with _http.stream(method, url, headers=headers, **kw) as r:
         if r.status_code != 200:
             return r.status_code, None
+        if r.headers.get("content-encoding", "identity").strip().lower() not in ("", "identity"):
+            return r.status_code, None   # comprimido pese a pedir identity: no se descomprime a ciegas
         buf = bytearray()
-        async for chunk in r.aiter_bytes():
-            buf += chunk
-            if len(buf) > limit:
+        async for chunk in r.aiter_raw():
+            if len(buf) + len(chunk) > limit:
                 return r.status_code, None
+            buf += chunk
         return r.status_code, bytes(buf)
 
 
