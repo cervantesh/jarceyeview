@@ -1386,11 +1386,22 @@
     // URLs de TERCEROS (webcams, radios, USGS…): solo http(s) absolutas y nunca hacia esta app ni a un host
     // local — si no, un dato manipulado podría hacer que la propia página pida /tiles o /api (cuota de pago).
     const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0", location.hostname.toLowerCase()]);
+    // IPs de red local: un dato de terceros no debe hacer que tu navegador llame a tu router u otros equipos.
+    function isPrivateIp(h) {
+      const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(h);
+      if (m) { const [a, b] = [+m[1], +m[2]];
+        return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+          || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224; }
+      if (h.startsWith("[")) { const v6 = h.slice(1, -1);
+        return v6 === "::" || v6 === "::1" || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || v6.startsWith("::ffff:"); }
+      return false;
+    }
     function extHref(u) {
       try {
         const x = new URL(String(u || ""));   // sin base: las rutas relativas (/tiles/…) se rechazan
         const h = x.hostname.toLowerCase();
-        if (!/^https?:$/.test(x.protocol) || LOCAL_HOSTS.has(h) || h.endsWith(".localhost") || x.host === location.host) return "";
+        if (!/^https?:$/.test(x.protocol) || LOCAL_HOSTS.has(h) || h.endsWith(".localhost") || x.host === location.host
+            || isPrivateIp(h)) return "";
         return x.href;
       } catch { return ""; }
     }
@@ -3787,11 +3798,11 @@
         const del = (pendingDel===i)
           ? `<div class="sdelrow"><button class="sd-yes" data-i="${i}">${icon("trash")} Sí, borrar</button><button class="sd-no" data-i="${i}">No</button></div>`
           : `<button class="sdel" data-i="${i}">${icon("trash")} Eliminar</button>`;
-        return `<div class="shot"><img src="${s.img}" alt="" title="${la}, ${lo} · clic para ampliar">
-          <div class="si"><b>SPYEYE ${s.id}</b> · <span class="o">${s.optic}</span><br>
+        return `<div class="shot"><img src="${imgData(s.img)}" alt="" title="${la}, ${lo} · clic para ampliar">
+          <div class="si"><b>SPYEYE ${esc(s.id)}</b> · <span class="o">${esc(s.optic)}</span><br>
             LAT <b>${la}</b> · LON <b>${lo}</b><br>
-            DIST <b>${s.dist}</b> · ELEV <b>${s.elev}</b> · AZ <b>${s.az}°</b><br>
-            AREA <b>${s.area}</b> · ${dt}</div>${del}</div>`;
+            DIST <b>${esc(s.dist)}</b> · ELEV <b>${esc(s.elev)}</b> · AZ <b>${esc(s.az)}°</b><br>
+            AREA <b>${esc(s.area)}</b> · ${esc(dt)}</div>${del}</div>`;
       }).join("");
       // muestra exactamente las primeras 5 capturas; el resto con scroll vertical
       requestAnimationFrame(()=>{ const shots=list.querySelectorAll(".shot");
@@ -4718,14 +4729,14 @@
     // --- Visor de captura a pantalla completa (con detalles) ---
     function openShotView(i){
       const s=spyShots[i]; if(!s) return; const dt=new Date(s.time).toLocaleString();
-      document.querySelector(".shv-img").src=s.img;
+      document.querySelector(".shv-img").src=imgData(s.img);
       document.querySelector(".shv-info").innerHTML=
-        `<h3>${icon("images")} SPYEYE ${s.id}</h3>`+
-        `<div>ÓPTICA · <b>${s.optic}</b></div>`+
+        `<h3>${icon("images")} SPYEYE ${esc(s.id)}</h3>`+
+        `<div>ÓPTICA · <b>${esc(s.optic)}</b></div>`+
         `<div>LAT · <b>${(+s.lat).toFixed(6)}</b></div><div>LON · <b>${(+s.lon).toFixed(6)}</b></div>`+
-        `<div>DIST · <b>${s.dist}</b></div><div>ELEV · <b>${s.elev}</b></div>`+
-        `<div>AZIMUT · <b>${s.az}°</b></div><div>ÁREA · <b>${s.area}</b></div>`+
-        `<div>FECHA · <b>${dt}</b></div>`+
+        `<div>DIST · <b>${esc(s.dist)}</b></div><div>ELEV · <b>${esc(s.elev)}</b></div>`+
+        `<div>AZIMUT · <b>${esc(s.az)}°</b></div><div>ÁREA · <b>${esc(s.area)}</b></div>`+
+        `<div>FECHA · <b>${esc(dt)}</b></div>`+
         `<div style="margin-top:10px;color:#7a97ad;font-size:11px">Rueda para zoom · doble clic · arrastrar para mover</div>`;
       shvScale=1; shvX=0; shvY=0; applyShv();
       $("shot-view").classList.add("on");
