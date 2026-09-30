@@ -73,16 +73,25 @@ def _ov_disk_read(query: str) -> list | None:
     return None
 
 
-_OVERPASS_MAX_FILES = 2000   # tope de la caché en disco (borra los más viejos)
+_OVERPASS_MAX_FILES = 500                    # tope de archivos en la caché en disco
+_OVERPASS_MAX_FILE_BYTES = 8 * 1024 * 1024    # una respuesta más grande no se guarda en disco
+_OVERPASS_MAX_DIR_BYTES = 300 * 1024 * 1024   # presupuesto total de la caché en disco
+_OVERPASS_MAX_ELEMENTS = 20000                # tope de vías por respuesta (memoria/disco)
 
 
 def _ov_disk_write(query: str, els: list) -> None:
     try:
         _OVERPASS_DIR.mkdir(parents=True, exist_ok=True)
+        data = json.dumps(els)
+        if len(data) > _OVERPASS_MAX_FILE_BYTES:
+            return
         files = sorted(_OVERPASS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime)
-        for f in files[:max(0, len(files) - _OVERPASS_MAX_FILES + 1)]:
-            f.unlink(missing_ok=True)
-        _ov_disk_path(query).write_text(json.dumps(els), encoding="utf-8")
+        total = sum(f.stat().st_size for f in files) + len(data)
+        while files and (len(files) >= _OVERPASS_MAX_FILES or total > _OVERPASS_MAX_DIR_BYTES):
+            old = files.pop(0)   # el más viejo primero
+            total -= old.stat().st_size
+            old.unlink(missing_ok=True)
+        _ov_disk_path(query).write_text(data, encoding="utf-8")
     except Exception:
         pass
 
@@ -161,6 +170,8 @@ async def overpass_query(query: str, key: str = "") -> list:
     disk = _ov_disk_read(query)
     if disk:
         if key:
+            if len(_overpass_cache) > 200:
+                _overpass_cache.clear()
             _overpass_cache[key] = (now, disk)
         return disk
     local = os.getenv("OVERPASS_URL", "").strip()
@@ -182,10 +193,13 @@ async def overpass_query(query: str, key: str = "") -> list:
             _ov_fail += 1
             if _ov_fail >= 2:                    # 2 fallos → 5 min sin tocar los Overpass públicos
                 _ov_down_until = time.monotonic() + 300
+    result = result[:_OVERPASS_MAX_ELEMENTS]
     if result:
         _ov_fail = 0
         _ov_down_until = 0.0
         if key:
+            if len(_overpass_cache) > 200:
+                _overpass_cache.clear()
             _overpass_cache[key] = (now, result)
         _ov_disk_write(query, result)
     return result
@@ -302,8 +316,11 @@ async def flight_status(callsign: str) -> dict | None:
         return hit[1]
     result = None
     try:
+        # El plan gratuito solo admite HTTP y la clave viajaría sin cifrar: por defecto HTTPS
+        # (planes de pago). AVIATIONSTACK_ALLOW_HTTP=1 acepta HTTP bajo tu responsabilidad.
+        http_ok = os.getenv("AVIATIONSTACK_ALLOW_HTTP", "").strip().lower() in ("1", "true", "yes", "on")
         r = await _http.get(
-            "http://api.aviationstack.com/v1/flights",
+            ("http" if http_ok else "https") + "://api.aviationstack.com/v1/flights",
             params={"access_key": key, "flight_icao": cs},
         )
         data = (r.json() or {}).get("data") or []
@@ -323,6 +340,8 @@ async def flight_status(callsign: str) -> dict | None:
             }
     except Exception:
         result = None
+    if len(_status_cache) > 1000:
+        _status_cache.clear()
     _status_cache[cs] = (now, result)
     return result
 
@@ -1593,6 +1612,8 @@ class RouteService:
                         result = {"origin": origin, "dest": dest, "airline": airline}
         except Exception:
             result = None
+        if len(self._cache) > 5000:
+            self._cache.clear()
         self._cache[cs] = result
         return result
 
