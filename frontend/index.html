@@ -1383,7 +1383,18 @@
     // Escapado HTML para cualquier texto externo (APIs, OSM, IA) que se inserte con innerHTML.
     function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
     // Solo URLs http(s), escapadas para usarse dentro de atributos (src/href).
-    function safeUrl(u) { try { const x = new URL(String(u || ""), location.href); return /^https?:$/.test(x.protocol) ? esc(x.href) : ""; } catch { return ""; } }
+    // URLs de TERCEROS (webcams, radios, USGS…): solo http(s) absolutas y nunca hacia esta app ni a un host
+    // local — si no, un dato manipulado podría hacer que la propia página pida /tiles o /api (cuota de pago).
+    const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0", location.hostname.toLowerCase()]);
+    function extHref(u) {
+      try {
+        const x = new URL(String(u || ""));   // sin base: las rutas relativas (/tiles/…) se rechazan
+        const h = x.hostname.toLowerCase();
+        if (!/^https?:$/.test(x.protocol) || LOCAL_HOSTS.has(h) || h.endsWith(".localhost") || x.host === location.host) return "";
+        return x.href;
+      } catch { return ""; }
+    }
+    function safeUrl(u) { return esc(extHref(u)); }   // para atributos src/href
     // Copia profunda con todos los strings escapados (para objetos que vienen de la IA).
     function imgData(b) { const s = String(b || "").replace(/\s+/g, ""); const m = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+\/=]+)$/.exec(s);
       return m ? s : (/^[A-Za-z0-9+\/=]+$/.test(s) ? "data:image/png;base64," + s : ""); }
@@ -2103,7 +2114,8 @@
 
     function playStation(st, id) {
       if (!st.url) return;
-      player.src = st.url;
+      const src = extHref(st.url); if (!src) return;
+      player.src = src;
       player.play().then(() => {
         playingId = id;
         $("np").innerHTML = `${icon("play")} <b>${esc(st.name)}</b><span class="stopbtn">${icon("stop")} detener</span>`;
@@ -2148,7 +2160,7 @@
       const c0=lastCenter||{lat:cam.lat,lon:cam.lon};
       const d=wcDistKm(c0.lat,c0.lon,cam.lat,cam.lon), dist=d<1?Math.round(d*1000)+" m":d.toFixed(1)+" km";
       const meta=[wcTimeAgo(cam.updated),dist].filter(Boolean).join(" · ");
-      const img=cam.preview?`<img src="${safeUrl(cam.preview)}" loading="lazy" onerror="this.style.visibility='hidden'">`:"";
+      const img=safeUrl(cam.preview)?`<img src="${safeUrl(cam.preview)}" loading="lazy" onerror="this.style.visibility='hidden'">`:"";
       return `<div class="wc-card">${img}<div class="wc-t">${esc(cam.title)}</div>`+
         `<div class="wc-m"><span class="wc-dot"></span>${meta}</div>`+
         `<span class="wc-fav ${isFav(cam)?'on':''}">${isFav(cam)?'♥':'♡'}</span></div>`;
@@ -2215,7 +2227,7 @@
       p.style.display = "block";
       const emb = safeUrl(cam.embed), embOk = emb && /^https:\/\/([a-z0-9-]+\.)*windy\.com\//i.test(emb);
       const media = embOk ? `<iframe src="${emb}" sandbox="allow-scripts allow-same-origin allow-presentation" referrerpolicy="no-referrer" allowfullscreen loading="lazy"></iframe>`
-                  : (cam.preview ? `<img src="${safeUrl(cam.preview)}" alt="">` : "");
+                  : (safeUrl(cam.preview) ? `<img src="${safeUrl(cam.preview)}" alt="">` : "");
       p.innerHTML =
         `<div class="wc-head"><span>${esc(cam.title)}</span><span class="wc-close">${icon("x")}</span></div>` +
         media +
@@ -2258,7 +2270,7 @@
     function showWcFollowPanel(cam){
       const p=$("wc-follow");
       const sub=[cam.city,cam.country].filter(Boolean).join(", ");
-      const prev=cam.preview?`<img class="wcf-prev" src="${safeUrl(cam.preview)}" onerror="this.style.display='none'">`:"";
+      const prev=safeUrl(cam.preview)?`<img class="wcf-prev" src="${safeUrl(cam.preview)}" onerror="this.style.display='none'">`:"";
       p.innerHTML =
         `<div class="wcf-head"><span class="pulse"></span> SIGUIENDO CÁMARA<span class="wcf-x">${icon("x")}</span></div>`+
         prev+
