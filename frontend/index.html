@@ -1385,7 +1385,7 @@
     // Solo URLs http(s), escapadas para usarse dentro de atributos (src/href).
     function safeUrl(u) { try { const x = new URL(String(u || ""), location.href); return /^https?:$/.test(x.protocol) ? esc(x.href) : ""; } catch { return ""; } }
     // Copia profunda con todos los strings escapados (para objetos que vienen de la IA).
-    function imgData(b) { const s = String(b || ""); const m = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+\/=]+)$/.exec(s);
+    function imgData(b) { const s = String(b || "").replace(/\s+/g, ""); const m = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+\/=]+)$/.exec(s);
       return m ? s : (/^[A-Za-z0-9+\/=]+$/.test(s) ? "data:image/png;base64," + s : ""); }
     function escDeep(v) { return Array.isArray(v) ? v.map(escDeep) : (v && typeof v === "object") ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, escDeep(x)])) : (typeof v === "string" ? esc(v) : v); }
     const statusEl = $("status");
@@ -3449,8 +3449,8 @@
           body: JSON.stringify(Object.assign({ prompt }, opts || {})) })).json();
       } catch {}
       think.remove();
-      if (d && d.b64) {
-        const src = imgData(d.b64);
+      const src = d && imgData(d.b64);
+      if (src) {
         const node = aiAppend("bot", "<img src='" + src + "' alt='generada'>" +
           "<a class='ai-dl' download='jarceye_ia.png' href='" + src + "'>⬇ Descargar</a> " +
           "<a class='ai-dl' data-act='rmmap' style='cursor:pointer'>🗺️ Quitar del mapa</a>" +

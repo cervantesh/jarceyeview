@@ -131,7 +131,8 @@ La app está pensada para correr **solo en tu equipo**. Protecciones incluidas:
 
 - El servidor escucha en `127.0.0.1` y solo acepta `Host` locales (`localhost`, `127.0.0.1`, `[::1]`),
   lo que bloquea ataques de *DNS rebinding*. Si necesitas otro nombre, añádelo en `ALLOWED_HOSTS`
-  (separado por comas).
+  (nombres de host sin puerto, separados por comas). Detrás de un proxy inverso, el proxy debe
+  conservar la cabecera `Host` original (p. ej. `proxy_set_header Host $host;` en nginx).
 - El WebSocket y toda petición que modifica estado exigen un `Origin` local: otra web abierta en tu
   navegador no puede controlar la app ni leer sus datos.
 - El gestor de claves no devuelve secretos, rechaza saltos de línea y valida los `*_HOST` como URL http(s).

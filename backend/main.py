@@ -452,7 +452,7 @@ def _hostname(hostport: str) -> str:
     if hp.count(":") == 1:
         host, port = hp.split(":")
         return host if port.isdigit() else ""
-    return "[::1]" if hp == "::1" else hp
+    return f"[{hp}]" if hp.count(":") > 1 else hp   # IPv6 sin corchetes (p. ej. ::1) -> [::1]
 
 
 # Entradas de ALLOWED_HOSTS: nombres de host (si traen puerto, se ignora).
@@ -739,7 +739,7 @@ def _bad_key_value(k: str, v: str) -> str | None:
         return f"{k}: no puede contener saltos de línea"
     if len(v) > 4096:
         return f"{k}: demasiado largo"
-    if k.endswith("_HOST") and v and not re.fullmatch(r"https?://[A-Za-z0-9.\-\[\]:]+(/[A-Za-z0-9._~/-]*)?", v):
+    if k.endswith("_HOST") and v and not re.fullmatch(r"https?://[A-Za-z0-9._\-\[\]:]+(/[A-Za-z0-9._~/-]*)?", v):
         return f"{k}: debe ser una URL http(s)://host[:puerto]"
     return None
 
