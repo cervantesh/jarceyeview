@@ -62,6 +62,11 @@ THRESHOLDS = [30, 20, 15, 10, 5]  # minutos antes de aterrizar
 
 opensky = OpenSky()
 routes = RouteService()
+
+
+def _h(v) -> str:
+    """Escapa datos externos para mensajes de Telegram (parse_mode=HTML) y para KML/HTML."""
+    return html.escape(str(v if v is not None else ""), quote=True)
 telegram = Telegram()
 
 
@@ -205,8 +210,8 @@ async def check_emergencies(aircraft: list[dict]) -> None:
                 meaning = {"7500": "secuestro", "7600": "fallo de radio",
                            "7700": "emergencia general"}.get(a["squawk"], "emergencia")
                 await telegram.send(
-                    f"🚨 <b>EMERGENCIA</b> — squawk {a['squawk']} ({meaning})\n"
-                    f"Vuelo <b>{a['name']}</b> ({a['country']})\n"
+                    f"🚨 <b>EMERGENCIA</b> — squawk {_h(a['squawk'])} ({meaning})\n"
+                    f"Vuelo <b>{_h(a['name'])}</b> ({_h(a['country'])})\n"
                     f"Pos: {a['lat']:.3f}, {a['lon']:.3f} · alt {round(a['alt'])} m"
                 )
     world.emergencies = current  # olvida los que ya no están en emergencia
@@ -313,7 +318,7 @@ def _fs_summary(fs: dict | None) -> str:
         parts.append(f"est. {est}")
     if fs.get("arr_delay"):
         parts.append(f"⏰ {fs['arr_delay']} min retraso")
-    return ("\n" + " · ".join(parts)) if parts else ""
+    return ("\n" + _h(" · ".join(parts))) if parts else ""
 
 
 async def _notify_track(t: Track, text: str) -> None:
@@ -334,9 +339,9 @@ async def tracker() -> None:
                 t.origin, t.dest = r.get("origin"), r.get("dest")
             t.fs = await flight_status(t.callsign)
             t.resolved = True
-            org = t.origin["name"] if t.origin else "¿?"
-            dst = t.dest["name"] if t.dest else "¿?"
-            msg = f"🛰️ Rastreando <b>{t.callsign}</b>\nRuta: {org} → {dst}"
+            org = _h(t.origin["name"]) if t.origin else "¿?"
+            dst = _h(t.dest["name"]) if t.dest else "¿?"
+            msg = f"🛰️ Rastreando <b>{_h(t.callsign)}</b>\nRuta: {org} → {dst}"
             if not t.dest:
                 msg += "\n⚠️ Destino desconocido: avisaré solo del aterrizaje."
             msg += _fs_summary(t.fs)
@@ -354,7 +359,7 @@ async def tracker() -> None:
             if t.lost >= 3 and t.inited and "landed" not in t.fired:
                 t.fired.add("landed")
                 t.done = True
-                await telegram.send(f"🛬 <b>{t.callsign}</b> desapareció del radar cerca del destino. Probable aterrizaje.")
+                await telegram.send(f"🛬 <b>{_h(t.callsign)}</b> desapareció del radar cerca del destino. Probable aterrizaje.")
             await broadcast({"type": "track", "callsign": t.callsign, "phase": "lost",
                              "message": "sin señal", "fired": sorted(t.fired)})
             await asyncio.sleep(POLL_INTERVAL)
@@ -379,8 +384,8 @@ async def tracker() -> None:
             t.fired.add("landed")
             t.done = True
             t.fs = await flight_status(t.callsign) or t.fs  # refresca gate/hora final
-            await telegram.send(f"🛬 <b>{t.callsign}</b> ha aterrizado" +
-                                (f" en {t.dest['name']}." if t.dest else ".") + _fs_summary(t.fs))
+            await telegram.send(f"🛬 <b>{_h(t.callsign)}</b> ha aterrizado" +
+                                (f" en {_h(t.dest['name'])}." if t.dest else ".") + _fs_summary(t.fs))
 
         # Umbrales de tiempo restante
         if eta is not None:
@@ -388,8 +393,8 @@ async def tracker() -> None:
                 if eta <= th and str(th) not in t.fired:
                     t.fired.add(str(th))
                     await telegram.send(
-                        f"⏱️ <b>{t.callsign}</b>: ~{th} min para aterrizar"
-                        + (f" en {t.dest['name']}" if t.dest else "")
+                        f"⏱️ <b>{_h(t.callsign)}</b>: ~{th} min para aterrizar"
+                        + (f" en {_h(t.dest['name'])}" if t.dest else "")
                         + f"\nDistancia {dist:.0f} km · alt {round(a['alt'])} m · {a['speed']*3.6:.0f} km/h"
                     )
 
@@ -485,6 +490,12 @@ app.add_middleware(LocalGuard)
 async def _no_cache_html(request, call_next):
     """El navegador no debe cachear el HTML/JS: así siempre carga la última versión del frontend."""
     resp = await call_next(request)
+    # Defensa en profundidad: sin sniffing de MIME, sin embebido en otras webs (clickjacking
+    # del gestor de claves) y sin filtrar la URL local como Referer a terceros.
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     ct = resp.headers.get("content-type", "")
     if "text/html" in ct or "javascript" in ct:
         resp.headers["Cache-Control"] = "no-store, must-revalidate"
@@ -773,15 +784,15 @@ def _placemark(a: dict, cached_route: dict | None) -> str:
     if cached_route and (cached_route.get("origin") or cached_route.get("dest")):
         o = (cached_route.get("origin") or {}).get("icao", "¿?")
         d = (cached_route.get("dest") or {}).get("icao", "¿?")
-        route_html = f"<tr><td>Ruta</td><td>{o} → {d}</td></tr>"
+        route_html = f"<tr><td>Ruta</td><td>{_h(o)} → {_h(d)}</td></tr>"
     desc = (
         "<table>"
-        f"<tr><td>ICAO24</td><td>{a['id']}</td></tr>"
+        f"<tr><td>ICAO24</td><td>{_h(a['id'])}</td></tr>"
         f"<tr><td>País</td><td>{html.escape(a['country'])}</td></tr>"
         f"<tr><td>Altitud</td><td>{round(a['alt'])} m</td></tr>"
         f"<tr><td>Velocidad</td><td>{kmh:.0f} km/h</td></tr>"
         f"<tr><td>Rumbo</td><td>{round(a['heading'])}°</td></tr>"
-        f"<tr><td>Squawk</td><td>{a['squawk'] or '—'}</td></tr>"
+        f"<tr><td>Squawk</td><td>{_h(a['squawk'] or '—')}</td></tr>"
         f"{route_html}</table>"
     )
     return (
@@ -1025,6 +1036,7 @@ PANEL_HTML = """<!doctype html><html lang="es"><head><meta charset="utf-8">
 
 <script>
 const $=(id)=>document.getElementById(id);
+const esc=(s)=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 async function track(){
   const cs=$("cs").value.trim(); if(!cs) return;
   const r=await (await fetch("/api/track",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -1038,7 +1050,7 @@ async function poll(){
     const tg=s.telegram?"TG✓":"TG✗", au=s.openskyAuth?"OpenSky auth":"OpenSky anónimo";
     $("status").innerHTML=`<div class="kv"><span>Aviones a la vista</span><span>${s.aircraft}</span></div>`
       +`<div class="kv"><span>Fuentes</span><span>${au} · ${tg}</span></div>`
-      +(s.error?`<div class="kv"><span>Aviso</span><span style="color:#ff9aa2">${s.error}</span></div>`:"");
+      +(s.error?`<div class="kv"><span>Aviso</span><span style="color:#ff9aa2">${esc(s.error)}</span></div>`:"");
     if(s.track){
       const t=s.track, eta=t.eta_min!=null?t.eta_min.toFixed(0)+" min":"—",
         dist=t.dist_km!=null?t.dist_km.toFixed(0)+" km":"—",
@@ -1046,8 +1058,8 @@ async function poll(){
       const chips=["30","20","15","10","5","landed"].map(k=>
         `<span class="th ${fired.has(k)?"done":""}">${k==="landed"?"🛬":k+"m"}</span>`).join("");
       $("track").innerHTML=`<hr style="border-color:#1f3d55">
-        <div class="kv"><span>Rastreando</span><span>${t.callsign}</span></div>
-        <div class="kv"><span>Ruta</span><span>${t.origin||"¿?"} → ${t.dest||"¿?"}</span></div>
+        <div class="kv"><span>Rastreando</span><span>${esc(t.callsign)}</span></div>
+        <div class="kv"><span>Ruta</span><span>${esc(t.origin||"¿?")} → ${esc(t.dest||"¿?")}</span></div>
         <div class="kv"><span>Distancia / ETA</span><span>${dist} · ${eta}</span></div>
         <div class="kv"><span>Fase</span><span>${t.phase==="landed"?"🛬 aterrizó":t.phase==="lost"?"sin señal":"en vuelo"}</span></div>
         <div style="margin-top:8px">${chips}</div>`;

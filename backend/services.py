@@ -192,13 +192,16 @@ async def overpass_query(query: str, key: str = "") -> list:
 
 
 async def geoip() -> dict | None:
-    """Ubicación aproximada por IP pública (el backend corre en la máquina del usuario)."""
+    """Ubicación aproximada por IP pública (respaldo si el navegador no da geolocalización).
+       Por HTTPS (ipapi.co). Desactivable con GEOIP_LOOKUP=0: así no se consulta a terceros."""
+    if os.getenv("GEOIP_LOOKUP", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
     try:
-        r = await _http.get("http://ip-api.com/json/")
+        r = await _http.get("https://ipapi.co/json/", headers={"User-Agent": "jarceyeview"})
         d = r.json()
-        if d.get("status") == "success":
-            return {"lat": d["lat"], "lon": d["lon"],
-                    "city": d.get("city", ""), "country": d.get("country", "")}
+        if not d.get("error") and d.get("latitude") is not None:
+            return {"lat": d["latitude"], "lon": d["longitude"],
+                    "city": d.get("city", ""), "country": d.get("country_name", "")}
     except Exception:
         pass
     return None
