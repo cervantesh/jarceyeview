@@ -1377,6 +1377,12 @@
 
   <script type="module">
     const $ = (id) => document.getElementById(id);
+    // Escapado HTML para cualquier texto externo (APIs, OSM, IA) que se inserte con innerHTML.
+    function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+    // Solo URLs http(s), escapadas para usarse dentro de atributos (src/href).
+    function safeUrl(u) { try { const x = new URL(String(u || ""), location.href); return /^https?:$/.test(x.protocol) ? esc(x.href) : ""; } catch { return ""; } }
+    // Copia profunda con todos los strings escapados (para objetos que vienen de la IA).
+    function escDeep(v) { return Array.isArray(v) ? v.map(escDeep) : (v && typeof v === "object") ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, escDeep(x)])) : (typeof v === "string" ? esc(v) : v); }
     const statusEl = $("status");
     const fail = (m) => { const o=$("overlay"); o.style.display="flex"; o.innerHTML=m; };
 
@@ -1839,10 +1845,10 @@
       if (ent && typeof ent.id === "string" && ent.id.startsWith("quake:")) {
         const q = quakeById.get(ent.id);
         if (q) showPopup(`Sismo M${q.mag}`,
-          `<div class="kv"><span>Lugar</span><span>${q.place}</span></div>
+          `<div class="kv"><span>Lugar</span><span>${esc(q.place)}</span></div>
            <div class="kv"><span>Profundidad</span><span>${q.depth!=null?q.depth.toFixed(0)+" km":"—"}</span></div>
            <div class="kv"><span>Hora</span><span>${new Date(q.time).toLocaleString()}</span></div>
-           <a href="${q.url}" target="_blank" rel="noopener">${icon("external")} Detalle USGS</a>`);
+           <a href="${safeUrl(q.url)}" target="_blank" rel="noopener">${icon("external")} Detalle USGS</a>`);
         return;
       }
       if (ent && ent.id === "iss" && issData) {
@@ -1854,8 +1860,8 @@
       }
       if (ent && typeof ent.id === "string" && ent.id.startsWith("ship:")) {
         const v = shipById.get(ent.id);
-        if(v) showPopup("Barco · " + (v.name||v.id),
-          `<div class="kv"><span>MMSI</span><span>${v.id}</span></div>
+        if(v) showPopup("Barco · " + esc(v.name||v.id),
+          `<div class="kv"><span>MMSI</span><span>${esc(v.id)}</span></div>
            <div class="kv"><span>Velocidad</span><span>${v.sog!=null?v.sog+" kn":"—"}</span></div>
            <div class="kv"><span>Rumbo (COG)</span><span>${v.cog!=null?Math.round(v.cog)+"°":"—"}</span></div>
            <div class="kv"><span>Heading</span><span>${(v.heading!=null&&v.heading!==511)?v.heading+"°":"—"}</span></div>`);
@@ -1865,10 +1871,10 @@
         const c = incById.get(ent.id);
         if(c){ const cat=(INC_CAT[c.cat]||["Incidente","#4fd8ff"]);
           showPopup(cat[0],
-            `<div class="kv"><span>Descripción</span><span>${c.desc||"—"}</span></div>`+
-            (c.from?`<div class="kv"><span>Desde</span><span>${c.from}</span></div>`:"")+
-            (c.to?`<div class="kv"><span>Hasta</span><span>${c.to}</span></div>`:"")+
-            (c.roads?`<div class="kv"><span>Vía</span><span>${c.roads}</span></div>`:"")+
+            `<div class="kv"><span>Descripción</span><span>${esc(c.desc||"—")}</span></div>`+
+            (c.from?`<div class="kv"><span>Desde</span><span>${esc(c.from)}</span></div>`:"")+
+            (c.to?`<div class="kv"><span>Hasta</span><span>${esc(c.to)}</span></div>`:"")+
+            (c.roads?`<div class="kv"><span>Vía</span><span>${esc(c.roads)}</span></div>`:"")+
             `<div class="kv"><span>Retraso</span><span>${c.delay!=null?Math.round(c.delay/60)+" min":"—"}</span></div>`);
         }
         return;
@@ -1876,9 +1882,9 @@
       if (ent && typeof ent.id === "string" && ent.id.startsWith("alpr:")) {
         const c = alprById.get(ent.id);
         if(c) showPopup("Cámara ALPR",
-          `<div class="kv"><span>Operador</span><span>${c.operator||"—"}</span></div>
-           <div class="kv"><span>Tipo</span><span>${c.type||"ALPR"}</span></div>
-           <div class="kv"><span>Orientación</span><span>${c.direction||"—"}</span></div>
+          `<div class="kv"><span>Operador</span><span>${esc(c.operator||"—")}</span></div>
+           <div class="kv"><span>Tipo</span><span>${esc(c.type||"ALPR")}</span></div>
+           <div class="kv"><span>Orientación</span><span>${esc(c.direction||"—")}</span></div>
            <div class="kv"><span>Coords</span><span>${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}</span></div>
            <div class="rmeta" style="margin-top:6px;color:#7a97ad">Fuente: OpenStreetMap / DeFlock (ubicación pública)</div>`);
         return;
@@ -1903,7 +1909,7 @@
       renderSelection(selected, null);
       ws?.send(JSON.stringify({ type:"route", callsign:selected.name }));
     });
-    const fmt = (v) => (v==null || v==="") ? "—" : v;
+    const fmt = (v) => (v==null || v==="") ? "—" : esc(v);
     function renderSelection(d, route) {
       const kmh = d.speed ? (d.speed*3.6).toFixed(0) : "0";
       const estado = d.status==="alert" ? '<span class="dot" style="color:#ff5c6c">●</span> Emergencia'
@@ -1911,9 +1917,9 @@
                    : '<span class="dot" style="color:#5fe08a">●</span> En vuelo';
       let ruta = `<div class="kv"><span>Ruta</span><span>buscando…</span></div>`;
       if (route) {
-        const o = route.origin ? `${route.origin.icao} · ${route.origin.name}` : "¿?";
-        const t = route.dest ? `${route.dest.icao} · ${route.dest.name}` : "¿?";
-        const air = route.airline ? `<div class="kv"><span>Aerolínea</span><span>${route.airline}</span></div>` : "";
+        const o = route.origin ? `${esc(route.origin.icao)} · ${esc(route.origin.name)}` : "¿?";
+        const t = route.dest ? `${esc(route.dest.icao)} · ${esc(route.dest.name)}` : "¿?";
+        const air = route.airline ? `<div class="kv"><span>Aerolínea</span><span>${esc(route.airline)}</span></div>` : "";
         ruta = air +
           `<div class="kv"><span>Origen</span><span>${o}</span></div>` +
           `<div class="kv"><span>Destino</span><span>${t}</span></div>`;
@@ -2083,8 +2089,8 @@
         }
         const row = document.createElement("div");
         row.className = "ritem"; row.dataset.id = id;
-        row.innerHTML = `<span>${st.name}</span>` +
-          `<span class="rmeta">${st.codec||""} ${st.bitrate||0}k</span>`;
+        row.innerHTML = `<span>${esc(st.name)}</span>` +
+          `<span class="rmeta">${esc(st.codec||"")} ${esc(st.bitrate||0)}k</span>`;
         row.onclick = () => playStation(st, id);
         listEl.appendChild(row);
       });
@@ -2095,12 +2101,12 @@
       player.src = st.url;
       player.play().then(() => {
         playingId = id;
-        $("np").innerHTML = `${icon("play")} <b>${st.name}</b><span class="stopbtn">${icon("stop")} detener</span>`;
+        $("np").innerHTML = `${icon("play")} <b>${esc(st.name)}</b><span class="stopbtn">${icon("stop")} detener</span>`;
         $("np").querySelector(".stopbtn").onclick = stopStation;
         document.querySelectorAll(".ritem").forEach(el =>
           el.classList.toggle("playing", el.dataset.id === id));
       }).catch(() => {
-        $("np").innerHTML = `⚠ No se pudo reproducir <b>${st.name}</b> (stream no compatible).`;
+        $("np").innerHTML = `⚠ No se pudo reproducir <b>${esc(st.name)}</b> (stream no compatible).`;
       });
     }
     function stopStation() {
@@ -2137,8 +2143,8 @@
       const c0=lastCenter||{lat:cam.lat,lon:cam.lon};
       const d=wcDistKm(c0.lat,c0.lon,cam.lat,cam.lon), dist=d<1?Math.round(d*1000)+" m":d.toFixed(1)+" km";
       const meta=[wcTimeAgo(cam.updated),dist].filter(Boolean).join(" · ");
-      const img=cam.preview?`<img src="${cam.preview}" loading="lazy" onerror="this.style.visibility='hidden'">`:"";
-      return `<div class="wc-card">${img}<div class="wc-t">${cam.title}</div>`+
+      const img=cam.preview?`<img src="${safeUrl(cam.preview)}" loading="lazy" onerror="this.style.visibility='hidden'">`:"";
+      return `<div class="wc-card">${img}<div class="wc-t">${esc(cam.title)}</div>`+
         `<div class="wc-m"><span class="wc-dot"></span>${meta}</div>`+
         `<span class="wc-fav ${isFav(cam)?'on':''}">${isFav(cam)?'♥':'♡'}</span></div>`;
     }
@@ -2202,13 +2208,13 @@
     function showWebcam(cam) {
       const p = $("wc-player");
       p.style.display = "block";
-      const media = cam.embed ? `<iframe src="${cam.embed}" allowfullscreen loading="lazy"></iframe>`
-                  : (cam.preview ? `<img src="${cam.preview}" alt="">` : "");
+      const media = safeUrl(cam.embed) ? `<iframe src="${safeUrl(cam.embed)}" allowfullscreen loading="lazy"></iframe>`
+                  : (cam.preview ? `<img src="${safeUrl(cam.preview)}" alt="">` : "");
       p.innerHTML =
-        `<div class="wc-head"><span>${cam.title}</span><span class="wc-close">${icon("x")}</span></div>` +
+        `<div class="wc-head"><span>${esc(cam.title)}</span><span class="wc-close">${icon("x")}</span></div>` +
         media +
-        `<div class="wc-head"><a href="${cam.detail}" target="_blank" rel="noopener">${icon("external")} Ver en Windy</a>` +
-        `<span>${cam.city||""} ${cam.country||""}</span></div>`;
+        `<div class="wc-head"><a href="${safeUrl(cam.detail)}" target="_blank" rel="noopener">${icon("external")} Ver en Windy</a>` +
+        `<span>${esc(cam.city||"")} ${esc(cam.country||"")}</span></div>`;
       placeFree(p);
       p.querySelector(".wc-close").onclick = () => { p.style.display = "none"; p.innerHTML = ""; };
     }
@@ -2246,13 +2252,13 @@
     function showWcFollowPanel(cam){
       const p=$("wc-follow");
       const sub=[cam.city,cam.country].filter(Boolean).join(", ");
-      const prev=cam.preview?`<img class="wcf-prev" src="${cam.preview}" onerror="this.style.display='none'">`:"";
+      const prev=cam.preview?`<img class="wcf-prev" src="${safeUrl(cam.preview)}" onerror="this.style.display='none'">`:"";
       p.innerHTML =
         `<div class="wcf-head"><span class="pulse"></span> SIGUIENDO CÁMARA<span class="wcf-x">${icon("x")}</span></div>`+
         prev+
         `<div class="wcf-body">`+
-          `<div class="wcf-title">${cam.title}</div>`+
-          `<div class="wcf-sub">${sub||"—"}</div>`+
+          `<div class="wcf-title">${esc(cam.title)}</div>`+
+          `<div class="wcf-sub">${esc(sub||"—")}</div>`+
           `<div class="wcf-row"><button class="wcf-live">${icon("play")} Ver en vivo</button>`+
           `<button class="wcf-recenter">${icon("target")} Recentrar</button></div>`+
           `<label class="chk"><input type="checkbox" class="wcf-lock" checked> Seguir en el mapa</label>`+
@@ -2320,7 +2326,7 @@
       const sb = $("searchbox");
       sb.style.display = "flex";
       sb.innerHTML =
-        `<span>${icon("pin")} <b>${name}</b></span>` +
+        `<span>${icon("pin")} <b>${esc(name)}</b></span>` +
         `<button class="sv">${icon("streetview")} Street View</button>` +
         `<span class="sclose">${icon("x")}</span>`;
       placeFree(sb);
@@ -2416,7 +2422,7 @@
       const p = $("sv-player");
       const wasHidden = getComputedStyle(p).display === "none";
       p.style.display = "block";
-      $("sv-title").innerHTML = `${icon("streetview")} Street View — ${name}`;
+      $("sv-title").innerHTML = `${icon("streetview")} Street View — ${esc(name)}`;
       $("sv-coord").textContent = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
       $("sv-ext").href = `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lon}`;
       ensureSvGraphics();
@@ -2745,8 +2751,8 @@
       const eta = msg.eta_min!=null ? `${msg.eta_min.toFixed(0)} min` : "—";
       const dist = msg.dist_km!=null ? `${msg.dist_km.toFixed(0)} km` : "—";
       $("trk-body").innerHTML =
-        `<div class="kv"><span>Vuelo</span><span>${msg.callsign}</span></div>
-         <div class="kv"><span>Ruta</span><span>${o} → ${t}</span></div>
+        `<div class="kv"><span>Vuelo</span><span>${esc(msg.callsign)}</span></div>
+         <div class="kv"><span>Ruta</span><span>${esc(o)} → ${esc(t)}</span></div>
          <div class="kv"><span>Distancia</span><span>${dist}</span></div>
          <div class="kv"><span>ETA</span><span>${eta}</span></div>
          <div class="kv"><span>Estado</span><span>${msg.phase==="landed"?"aterrizó":msg.phase==="lost"?"sin señal":"en vuelo"}</span></div>`
@@ -2801,7 +2807,7 @@
         const msg = JSON.parse(ev.data);
         if (msg.type==="state") {
           render(msg.entities||[]);
-          if (msg.error) { statusEl.innerHTML=`<span id="err">⚠ ${msg.error}</span>`; } else liveStatus();
+          if (msg.error) { statusEl.innerHTML=`<span id="err">⚠ ${esc(msg.error)}</span>`; } else liveStatus();
         } else if (msg.type==="route") {
           if (selected && selected.name===msg.callsign) { selectedRoute = msg; renderSelection(selected, msg); }
         } else if (msg.type==="status") {
@@ -2944,18 +2950,21 @@
       const list=$("km-list"); list.innerHTML='<div style="color:#7a97ad">Cargando…</div>';
       let keys=[]; try{ keys=(await (await fetch("/api/keys")).json()).keys||[]; }catch{}
       list.innerHTML=keys.map(k=>{
-        const tag = k.value ? '<span class="km-tag">● configurada</span>' : "";
+        const tag = (k.set || k.value) ? '<span class="km-tag">● configurada</span>' : "";
         const rst = k.restart ? '<span class="km-restart">↻ requiere reiniciar</span>' : "";
         const type = k.secret ? "password" : "text";
-        const val = (k.value||"").replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
-        return `<div class="km-row"><label>${k.label} <code>(${k.name})</code>${tag}${rst}</label>
-          <input data-k="${k.name}" data-secret="${k.secret?1:0}" type="${type}" value="${val}" placeholder="—" autocomplete="off" spellcheck="false"></div>`;
+        const val = esc(k.value||"");
+        const ph = k.secret && k.set ? esc("sin cambios (" + (k.hint||"••••") + ")") : "—";
+        return `<div class="km-row"><label>${esc(k.label)} <code>(${esc(k.name)})</code>${tag}${rst}</label>
+          <input data-k="${esc(k.name)}" data-secret="${k.secret?1:0}" data-orig="${val}" type="${type}" value="${val}" placeholder="${ph}" autocomplete="off" spellcheck="false"></div>`;
       }).join("");
     }
     function applyKeyReveal(){ const show=$("km-show").checked;
       $("km-list").querySelectorAll("input[data-k]").forEach(inp=>{ if(inp.dataset.secret==="1") inp.type=show?"text":"password"; }); }
     async function saveKeys(){
-      const body={}; $("km-list").querySelectorAll("input[data-k]").forEach(inp=>{ body[inp.dataset.k]=inp.value; });
+      // Solo lo que el usuario cambió: los secretos llegan vacíos del servidor y vacío = "no tocar".
+      const body={}; $("km-list").querySelectorAll("input[data-k]").forEach(inp=>{ if(inp.value!==(inp.dataset.orig||"")) body[inp.dataset.k]=inp.value; });
+      if(!Object.keys(body).length){ $("km-msg").className=""; $("km-msg").textContent="Sin cambios."; return; }
       const msg=$("km-msg"); msg.className=""; msg.textContent="Guardando…";
       try{ const r=await (await fetch("/api/keys",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
         if(r.ok){ msg.className="ok"; msg.textContent = (r.restart&&r.restart.length)
@@ -3339,7 +3348,6 @@
       aiOpen(true); aiAppend("bot", esc(text)); aiHistory.push({ role: "assistant", content: text });
       if (doSpeak !== false) speak(text);
     }
-    function esc(s) { return String(s == null ? "" : s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
     async function aiHealthCheck() {
       try {
         aiHealth = await (await fetch("/api/ai/health")).json();
@@ -4938,7 +4946,8 @@
         body:JSON.stringify({image:liveImg,lat:c.lat,lon:c.lon})})).json(); }catch{} }
       stopLiveStatus(); renderDashboard(data, liveImg); modal.classList.add("done"); liveBusy=false;
     }
-    function renderDashboard(d, img){
+    function renderDashboard(dRaw, img){
+      const d=escDeep(dRaw), Vraw=(dRaw&&dRaw.vehicles)||[];
       if(!d || d.error){ $("live-content").innerHTML=`<div class="lc-head"><h2>ANÁLISIS NO DISPONIBLE</h2></div><div class="lc-meta">No se pudo analizar la vista. ${(d&&d.error)||""}</div>`; return; }
       const b=d.building||{}, V=(d.vehicles||[]);
       const roofs=(d.roof_sections||[]).map(r=>`<div class="kv"><span>${r.id||""}</span><span>${r.material||""} · ${r.area||""}</span></div>`).join("");
@@ -4978,11 +4987,11 @@
          </div>
          <div class="lc-disc">⚠ Análisis IA a partir de la imagen de la zona: placas, modelos y medidas son ESTIMACIONES para demostración, no datos verificados.</div>`;
       if(img && V.length) decorateVehicles(img, V);
-      const btn=$("gen-imgs"); if(btn) btn.onclick=()=>generateViews(img, d);
+      const btn=$("gen-imgs"); if(btn) btn.onclick=()=>generateViews(img, dRaw);
       // Modelos fotorrealistas por vehículo (tipo · año · color), del color indicado.
-      $("live-content").querySelectorAll(".veh-gen").forEach(b=>b.onclick=()=>genVehicleModel(V[+b.dataset.i], +b.dataset.i));
+      $("live-content").querySelectorAll(".veh-gen").forEach(b=>b.onclick=()=>genVehicleModel(Vraw[+b.dataset.i], +b.dataset.i));
       const gall=$("veh-gen-all"); if(gall) gall.onclick=async()=>{ gall.disabled=true; const n=Math.min(V.length,6);
-        for(let i=0;i<n;i++){ await genVehicleModel(V[i], i); } gall.disabled=false; };
+        for(let i=0;i<n;i++){ await genVehicleModel(Vraw[i], i); } gall.disabled=false; };
       // Auto: en cuanto está el análisis, la IA produce la imagen HD de la zona (autos + estructuras).
       if(img) generateViews(img, d);
     }

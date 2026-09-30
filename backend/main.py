@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -418,6 +419,68 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="JARC's EYE View", lifespan=lifespan)
 
 
+# --------------------------------------------------------------------------
+# Guardia de red local: Host / Origin / tamaño del cuerpo
+# --------------------------------------------------------------------------
+# El servidor es solo para esta máquina. Se valida:
+#  - Host:   solo localhost/127.0.0.1/[::1] (+ ALLOWED_HOSTS) -> bloquea DNS rebinding.
+#  - Origin: en WebSocket y en peticiones que cambian estado, solo desde esos mismos hosts
+#            -> otra web abierta en el navegador no puede usar la API ni el /ws.
+#  - Cuerpo: tope de MAX_BODY_MB (por defecto 25 MB) para no agotar memoria.
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
+_ALLOWED_HOSTS = _LOCAL_HOSTS | {h.strip().lower() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()}
+_MAX_BODY = int(float(os.getenv("MAX_BODY_MB", "25")) * 1024 * 1024)
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _hostname(hostport: str) -> str:
+    """'localhost:8000' -> 'localhost', '[::1]:8000' -> '[::1]'."""
+    hp = (hostport or "").strip().lower()
+    if hp.startswith("["):
+        return hp.split("]", 1)[0] + "]"
+    return hp.rsplit(":", 1)[0] if hp.count(":") == 1 else hp
+
+
+def _origin_ok(origin: str) -> bool:
+    if not origin:
+        return True   # sin Origin: herramientas locales (curl, Google Earth), no un navegador cross-site
+    scheme, _, rest = origin.partition("://")
+    return scheme in ("http", "https") and _hostname(rest) in _ALLOWED_HOSTS
+
+
+class LocalGuard:
+    """Middleware ASGI (cubre HTTP y WebSocket)."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        status, reason = 0, ""
+        if _hostname(headers.get("host", "")) not in _ALLOWED_HOSTS:
+            status, reason = 403, "host no permitido"
+        elif (scope["type"] == "websocket" or scope.get("method", "GET") not in _SAFE_METHODS) \
+                and not _origin_ok(headers.get("origin", "")):
+            status, reason = 403, "origen no permitido"
+        elif scope["type"] == "http":
+            try:
+                if int(headers.get("content-length", "0") or 0) > _MAX_BODY:
+                    status, reason = 413, "cuerpo demasiado grande"
+            except ValueError:
+                status, reason = 400, "content-length inválido"
+        if not status:
+            return await self.app(scope, receive, send)
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await JSONResponse({"error": reason}, status_code=status)(scope, receive, send)
+
+
+app.add_middleware(LocalGuard)
+
+
 @app.middleware("http")
 async def _no_cache_html(request, call_next):
     """El navegador no debe cachear el HTML/JS: así siempre carga la última versión del frontend."""
@@ -509,10 +572,17 @@ async def api_enhance(payload: dict) -> JSONResponse:
 
 @app.post("/api/generate")
 async def api_generate(payload: dict) -> JSONResponse:
+    def _clamp(v, lo, hi, default):
+        try:
+            return max(lo, min(hi, int(v)))
+        except (TypeError, ValueError):
+            return default
+    steps = payload.get("steps")
     d = await generate_image(
-        payload.get("prompt", ""), payload.get("negative", ""),
-        payload.get("width", 768), payload.get("height", 768),
-        payload.get("steps"), payload.get("seed", -1), payload.get("image"))
+        str(payload.get("prompt", ""))[:2000], str(payload.get("negative", ""))[:2000],
+        _clamp(payload.get("width"), 64, 1536, 768), _clamp(payload.get("height"), 64, 1536, 768),
+        None if steps is None else _clamp(steps, 1, 60, 22),
+        _clamp(payload.get("seed"), -1, 2**32 - 1, -1), payload.get("image"))
     return JSONResponse(d or {"error": "generación no disponible"})
 
 
@@ -605,19 +675,42 @@ KEY_DEFS = [
 ]
 
 
+def _key_view(n: str, lbl: str, sec: bool, rst: bool) -> dict:
+    v = os.getenv(n, "")
+    d = {"name": n, "label": lbl, "secret": sec, "restart": rst, "set": bool(v)}
+    if sec:   # los secretos NUNCA salen del backend: solo si está puesta y sus 4 últimos caracteres
+        d["value"] = ""
+        d["hint"] = ("••••" + v[-4:]) if len(v) >= 12 else ("••••" if v else "")
+    else:
+        d["value"] = v
+    return d
+
+
 @app.get("/api/keys")
 async def api_keys_get() -> JSONResponse:
-    return JSONResponse({"keys": [
-        {"name": n, "label": lbl, "secret": sec, "restart": rst, "value": os.getenv(n, "")}
-        for (n, lbl, sec, rst) in KEY_DEFS]})
+    return JSONResponse({"keys": [_key_view(*k) for k in KEY_DEFS]})
+
+
+def _bad_key_value(k: str, v: str) -> str | None:
+    if any(c in v for c in "\r\n\x00"):
+        return f"{k}: no puede contener saltos de línea"
+    if len(v) > 4096:
+        return f"{k}: demasiado largo"
+    if k.endswith("_HOST") and v and not re.match(r"^https?://[^\s/?#]+(/[^\s]*)?$", v):
+        return f"{k}: debe ser una URL http(s)://host[:puerto]"
+    return None
 
 
 @app.post("/api/keys")
 async def api_keys_set(payload: dict) -> JSONResponse:
     known = {n: rst for (n, _l, _s, rst) in KEY_DEFS}
-    updates = {k: str(v) for k, v in (payload or {}).items() if k in known}
+    updates = {k: str(v).strip() for k, v in (payload or {}).items() if k in known}
     if not updates:
         return JSONResponse({"ok": False, "error": "sin claves válidas"}, status_code=400)
+    for k, v in updates.items():
+        err = _bad_key_value(k, v)
+        if err:
+            return JSONResponse({"ok": False, "error": err}, status_code=400)
     # Reescribe el .env preservando comentarios y otras variables
     lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
     seen: set[str] = set()

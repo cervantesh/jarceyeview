@@ -73,9 +73,15 @@ def _ov_disk_read(query: str) -> list | None:
     return None
 
 
+_OVERPASS_MAX_FILES = 2000   # tope de la caché en disco (borra los más viejos)
+
+
 def _ov_disk_write(query: str, els: list) -> None:
     try:
         _OVERPASS_DIR.mkdir(parents=True, exist_ok=True)
+        files = sorted(_OVERPASS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime)
+        for f in files[:max(0, len(files) - _OVERPASS_MAX_FILES + 1)]:
+            f.unlink(missing_ok=True)
         _ov_disk_path(query).write_text(json.dumps(els), encoding="utf-8")
     except Exception:
         pass
@@ -144,7 +150,7 @@ async def overpass_query(query: str, key: str = "") -> list:
        (5 min) + disco (30 días) y CIRCUIT BREAKER: si Overpass no responde varias veces seguidas,
        deja de consultarlo un rato (respuesta instantánea) para no colgar la app ni martillear."""
     global _ov_fail, _ov_down_until
-    if not (query or "").strip():
+    if not (query or "").strip() or len(query) > 4000:   # el frontend solo pide calles de un bbox
         return []
     now = time.monotonic()
     if key and key in _overpass_cache:
