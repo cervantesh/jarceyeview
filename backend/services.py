@@ -232,6 +232,8 @@ async def reverse_country(lat: float, lon: float) -> str | None:
         cc = ((r.json().get("address") or {}).get("country_code") or "").upper() or None
     except Exception:
         cc = None
+    if len(_country_cache) > 2000:
+        _country_cache.clear()
     _country_cache[key] = cc
     return cc
 
@@ -1273,6 +1275,7 @@ async def analyze_scene(image: str, lat: float, lon: float) -> dict | None:
     if not _openai_ok():
         return {"error": "IA de visión local no respondió. Verifica que llama.cpp (Qwen3-VL) o un "
                          "modelo con visión en Ollama esté cargado y disponible."}
+    key = os.getenv("OPENAI_API_KEY", "")
     url = image if image.startswith("data:") else f"data:image/png;base64,{image}"
     body = {
         "model": "gpt-4o", "temperature": 0.4, "max_tokens": 1600,
@@ -1393,6 +1396,8 @@ async def traffic_incidents(s: float, w: float, n: float, e: float) -> list[dict
                         "to": p.get("to", ""), "roads": ", ".join(p.get("roadNumbers") or [])})
     except Exception:
         out = []
+    if len(_inc_cache) > 500:
+        _inc_cache.clear()
     _inc_cache[ck] = (now, out[:400])
     return _inc_cache[ck][1]
 
@@ -1427,6 +1432,8 @@ async def alpr_cameras(s: float, w: float, n: float, e: float) -> list[dict]:
                         "type": t.get("surveillance:type", "ALPR")})
     except Exception:
         out = []
+    if len(_alpr_cache) > 500:
+        _alpr_cache.clear()
     _alpr_cache[key] = (now, out)
     return out
 

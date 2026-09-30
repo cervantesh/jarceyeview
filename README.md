@@ -148,6 +148,10 @@ Recomendaciones:
 - Pon **cuotas o límites de gasto** a las claves de pago (Google, OpenAI) y configura solo las que uses.
 - La ubicación por IP (respaldo si el navegador no la da) consulta `ipapi.co` por HTTPS;
   desactívala con `GEOIP_LOOKUP=0`.
+- **AviationStack** (plan gratuito) solo funciona por HTTP: su clave viaja sin cifrar. Úsala solo en
+  redes de confianza o no la configures.
+- Otra web abierta en tu navegador no puede hacer peticiones a la app (se bloquean las peticiones
+  *cross-site*, también los GET que gastarían cuota de tus APIs de pago).
 
 ## 2. Instalación
 

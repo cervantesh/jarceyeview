@@ -38,7 +38,7 @@ from pathlib import Path
 import html
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -53,7 +53,7 @@ from services import (OpenSky, RouteService, Telegram, aclose, ai_chat, ai_healt
                       rain_radar, revgeo, sd_host, tomtom_tile, traffic_incidents,
                       voice_intent, webcams)
 
-load_dotenv()
+load_dotenv(interpolate=False)   # sin expansión ${VAR}: un valor no puede copiar otro secreto
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "12"))  # 12s: el frontend interpola entre consultas; ahorra cuota OpenSky
@@ -433,24 +433,39 @@ app = FastAPI(title="JARC's EYE View", lifespan=lifespan)
 #            -> otra web abierta en el navegador no puede usar la API ni el /ws.
 #  - Cuerpo: tope de MAX_BODY_MB (por defecto 25 MB) para no agotar memoria.
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
-_ALLOWED_HOSTS = _LOCAL_HOSTS | {h.strip().lower() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()}
-_MAX_BODY = int(float(os.getenv("MAX_BODY_MB", "25")) * 1024 * 1024)
+try:
+    _MAX_BODY = int(float(os.getenv("MAX_BODY_MB") or 25) * 1024 * 1024)
+except ValueError:
+    _MAX_BODY = 25 * 1024 * 1024
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
 def _hostname(hostport: str) -> str:
-    """'localhost:8000' -> 'localhost', '[::1]:8000' -> '[::1]'."""
+    """'localhost:8000' -> 'localhost', '[::1]:8000' -> '[::1]'. Devuelve "" si el formato no es válido."""
     hp = (hostport or "").strip().lower()
     if hp.startswith("["):
-        return hp.split("]", 1)[0] + "]"
-    return hp.rsplit(":", 1)[0] if hp.count(":") == 1 else hp
+        end = hp.find("]")
+        if end < 0:
+            return ""
+        host, rest = hp[:end + 1], hp[end + 1:]
+        return host if rest == "" or re.fullmatch(r":\d{1,5}", rest) else ""
+    if hp.count(":") == 1:
+        host, port = hp.split(":")
+        return host if port.isdigit() else ""
+    return "[::1]" if hp == "::1" else hp
 
 
-def _origin_ok(origin: str) -> bool:
+# Entradas de ALLOWED_HOSTS: nombres de host (si traen puerto, se ignora).
+_ALLOWED_HOSTS = _LOCAL_HOSTS | {_hostname(h) for h in os.getenv("ALLOWED_HOSTS", "").split(",") if _hostname(h)}
+
+
+def _origin_ok(origin: str, host: str) -> bool:
     if not origin:
         return True   # sin Origin: herramientas locales (curl, Google Earth), no un navegador cross-site
     scheme, _, rest = origin.partition("://")
-    return scheme in ("http", "https") and _hostname(rest) in _ALLOWED_HOSTS
+    # Mismo host Y mismo puerto que la petición: otra app en localhost:8188/8080/… no cuenta.
+    return scheme in ("http", "https") and rest.lower() == (host or "").strip().lower() \
+        and _hostname(rest) in _ALLOWED_HOSTS
 
 
 class LocalGuard:
@@ -467,8 +482,13 @@ class LocalGuard:
         if _hostname(headers.get("host", "")) not in _ALLOWED_HOSTS:
             status, reason = 403, "host no permitido"
         elif (scope["type"] == "websocket" or scope.get("method", "GET") not in _SAFE_METHODS) \
-                and not _origin_ok(headers.get("origin", "")):
+                and not _origin_ok(headers.get("origin", ""), headers.get("host", "")):
             status, reason = 403, "origen no permitido"
+        elif headers.get("sec-fetch-site") in ("cross-site", "same-site") and not (
+                headers.get("sec-fetch-mode") == "navigate" and headers.get("sec-fetch-dest") == "document"):
+            # Otra web no puede disparar peticiones (ni GET: <img src=/tiles/...> gastaría tus APIs de pago).
+            # Se permite solo abrir la app desde un enlace. Google Earth no envía Sec-Fetch-*.
+            status, reason = 403, "petición cross-site no permitida"
         elif scope["type"] == "http":
             try:
                 if int(headers.get("content-length", "0") or 0) > _MAX_BODY:
@@ -476,7 +496,19 @@ class LocalGuard:
             except ValueError:
                 status, reason = 400, "content-length inválido"
         if not status:
-            return await self.app(scope, receive, send)
+            if scope["type"] != "http":
+                return await self.app(scope, receive, send)
+            total = 0
+
+            async def limited_receive():
+                nonlocal total
+                msg = await receive()
+                if msg.get("type") == "http.request":
+                    total += len(msg.get("body", b""))
+                    if total > _MAX_BODY:   # también para cuerpos chunked sin Content-Length
+                        raise HTTPException(status_code=413, detail="cuerpo demasiado grande")
+                return msg
+            return await self.app(scope, limited_receive, send)
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1008})
             return
@@ -703,11 +735,11 @@ async def api_keys_get() -> JSONResponse:
 
 
 def _bad_key_value(k: str, v: str) -> str | None:
-    if any(c in v for c in "\r\n\x00"):
+    if re.search(r"[\x00-\x1f\x7f\x85\u2028\u2029]", v):   # todo lo que splitlines() partiría
         return f"{k}: no puede contener saltos de línea"
     if len(v) > 4096:
         return f"{k}: demasiado largo"
-    if k.endswith("_HOST") and v and not re.match(r"^https?://[^\s/?#]+(/[^\s]*)?$", v):
+    if k.endswith("_HOST") and v and not re.fullmatch(r"https?://[A-Za-z0-9.\-\[\]:]+(/[A-Za-z0-9._~/-]*)?", v):
         return f"{k}: debe ser una URL http(s)://host[:puerto]"
     return None
 

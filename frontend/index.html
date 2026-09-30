@@ -1385,6 +1385,8 @@
     // Solo URLs http(s), escapadas para usarse dentro de atributos (src/href).
     function safeUrl(u) { try { const x = new URL(String(u || ""), location.href); return /^https?:$/.test(x.protocol) ? esc(x.href) : ""; } catch { return ""; } }
     // Copia profunda con todos los strings escapados (para objetos que vienen de la IA).
+    function imgData(b) { const s = String(b || ""); const m = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+\/=]+)$/.exec(s);
+      return m ? s : (/^[A-Za-z0-9+\/=]+$/.test(s) ? "data:image/png;base64," + s : ""); }
     function escDeep(v) { return Array.isArray(v) ? v.map(escDeep) : (v && typeof v === "object") ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, escDeep(x)])) : (typeof v === "string" ? esc(v) : v); }
     const statusEl = $("status");
     const fail = (m) => { const o=$("overlay"); o.style.display="flex"; o.innerHTML=m; };
@@ -1847,7 +1849,7 @@
       }
       if (ent && typeof ent.id === "string" && ent.id.startsWith("quake:")) {
         const q = quakeById.get(ent.id);
-        if (q) showPopup(`Sismo M${q.mag}`,
+        if (q) showPopup(`Sismo M${esc(q.mag)}`,
           `<div class="kv"><span>Lugar</span><span>${esc(q.place)}</span></div>
            <div class="kv"><span>Profundidad</span><span>${q.depth!=null?q.depth.toFixed(0)+" km":"—"}</span></div>
            <div class="kv"><span>Hora</span><span>${new Date(q.time).toLocaleString()}</span></div>
@@ -1898,9 +1900,9 @@
         if(f) showPopup("🔥 Incendio activo (NASA FIRMS)",
           `<div class="kv"><span>Coords</span><span>${f.lat.toFixed(4)}, ${f.lon.toFixed(4)}</span></div>
            <div class="kv"><span>Potencia (FRP)</span><span>${f.frp!=null?f.frp.toFixed(1)+" MW":"—"}</span></div>
-           <div class="kv"><span>Confianza</span><span>${f.conf||"—"}</span></div>
-           <div class="kv"><span>Brillo</span><span>${f.bright||"—"} K</span></div>
-           <div class="kv"><span>Detección</span><span>${f.date||""} ${f.time||""} UTC ${f.daynight==="D"?"☀":f.daynight==="N"?"🌙":""}</span></div>
+           <div class="kv"><span>Confianza</span><span>${esc(f.conf||"—")}</span></div>
+           <div class="kv"><span>Brillo</span><span>${esc(f.bright||"—")} K</span></div>
+           <div class="kv"><span>Detección</span><span>${esc(f.date||"")} ${esc(f.time||"")} UTC ${f.daynight==="D"?"☀":f.daynight==="N"?"🌙":""}</span></div>
            <div class="rmeta" style="margin-top:6px;color:#7a97ad">VIIRS SNPP · últimas 24 h</div>`);
         return;
       }
@@ -2013,15 +2015,15 @@
     function renderFs(fs, el) {
       if (!fs) { el.innerHTML = `<div class="rmeta" style="color:#7a97ad">Sin datos de horario para este vuelo.</div>`; return; }
       const est = { scheduled:"programado", active:"en vuelo", landed:"aterrizado",
-                    cancelled:"cancelado", incident:"incidente", diverted:"desviado" }[fs.status] || fs.status || "—";
-      const delay = fs.arr_delay ? `<span style="color:#ffcc55">${fs.arr_delay} min</span>` : "—";
+                    cancelled:"cancelado", incident:"incidente", diverted:"desviado" }[fs.status] || esc(fs.status) || "—";
+      const delay = fs.arr_delay ? `<span style="color:#ffcc55">${esc(fs.arr_delay)} min</span>` : "—";
       el.innerHTML =
         `<div class="kv"><span>Estado vuelo</span><span>${est}</span></div>
-         <div class="kv"><span>Terminal</span><span>${fs.arr_terminal||"—"}</span></div>
-         <div class="kv"><span>Gate</span><span>${fs.arr_gate||"—"}</span></div>
-         <div class="kv"><span>Cinta equipaje</span><span>${fs.arr_baggage||"—"}</span></div>
-         <div class="kv"><span>Aterrizaje prog.</span><span>${fmtTime(fs.arr_scheduled)}</span></div>
-         <div class="kv"><span>Estimado</span><span>${fmtTime(fs.arr_estimated)}</span></div>
+         <div class="kv"><span>Terminal</span><span>${esc(fs.arr_terminal||"—")}</span></div>
+         <div class="kv"><span>Gate</span><span>${esc(fs.arr_gate||"—")}</span></div>
+         <div class="kv"><span>Cinta equipaje</span><span>${esc(fs.arr_baggage||"—")}</span></div>
+         <div class="kv"><span>Aterrizaje prog.</span><span>${esc(fmtTime(fs.arr_scheduled))}</span></div>
+         <div class="kv"><span>Estimado</span><span>${esc(fmtTime(fs.arr_estimated))}</span></div>
          <div class="kv"><span>Retraso llegada</span><span>${delay}</span></div>`;
     }
     $("btn-status").addEventListener("click", () => {
@@ -2211,7 +2213,8 @@
     function showWebcam(cam) {
       const p = $("wc-player");
       p.style.display = "block";
-      const media = safeUrl(cam.embed) ? `<iframe src="${safeUrl(cam.embed)}" allowfullscreen loading="lazy"></iframe>`
+      const emb = safeUrl(cam.embed), embOk = emb && /^https:\/\/([a-z0-9-]+\.)*windy\.com\//i.test(emb);
+      const media = embOk ? `<iframe src="${emb}" sandbox="allow-scripts allow-same-origin allow-presentation" referrerpolicy="no-referrer" allowfullscreen loading="lazy"></iframe>`
                   : (cam.preview ? `<img src="${safeUrl(cam.preview)}" alt="">` : "");
       p.innerHTML =
         `<div class="wc-head"><span>${esc(cam.title)}</span><span class="wc-close">${icon("x")}</span></div>` +
@@ -2760,9 +2763,9 @@
          <div class="kv"><span>ETA</span><span>${eta}</span></div>
          <div class="kv"><span>Estado</span><span>${msg.phase==="landed"?"aterrizó":msg.phase==="lost"?"sin señal":"en vuelo"}</span></div>`
         + (msg.fs ? (() => { const f=msg.fs, ft=(i)=>(i&&i.length>=16)?i.slice(11,16):"—";
-            return `<div class="kv"><span>Terminal / Gate</span><span>${f.arr_terminal||"—"} / ${f.arr_gate||"—"}</span></div>
-             <div class="kv"><span>Aterrizaje prog.</span><span>${ft(f.arr_scheduled)}</span></div>
-             <div class="kv"><span>Retraso</span><span>${f.arr_delay?f.arr_delay+" min":"—"}</span></div>`; })() : "");
+            return `<div class="kv"><span>Terminal / Gate</span><span>${esc(f.arr_terminal||"—")} / ${esc(f.arr_gate||"—")}</span></div>
+             <div class="kv"><span>Aterrizaje prog.</span><span>${esc(ft(f.arr_scheduled))}</span></div>
+             <div class="kv"><span>Retraso</span><span>${f.arr_delay?esc(f.arr_delay)+" min":"—"}</span></div>`; })() : "");
       const fired = new Set(msg.fired||[]);
       $("trk-thr").innerHTML = ["30","20","15","10","5","landed"].map(k =>
         `<span class="th ${fired.has(k)?"done":""}">${k==="landed"?icon("plane"):k+"m"}</span>`).join("");
@@ -2958,20 +2961,25 @@
         const type = k.secret ? "password" : "text";
         const val = esc(k.value||"");
         const ph = k.secret && k.set ? esc("sin cambios (" + (k.hint||"••••") + ")") : "—";
-        return `<div class="km-row"><label>${esc(k.label)} <code>(${esc(k.name)})</code>${tag}${rst}</label>
+        const clr = k.secret && k.set ? `<button type="button" class="km-clear" data-clear="${esc(k.name)}" style="margin-left:8px;padding:1px 8px;font-size:11px;width:auto">borrar</button>` : "";
+        return `<div class="km-row"><label>${esc(k.label)} <code>(${esc(k.name)})</code>${tag}${rst}${clr}</label>
           <input data-k="${esc(k.name)}" data-secret="${k.secret?1:0}" data-orig="${val}" type="${type}" value="${val}" placeholder="${ph}" autocomplete="off" spellcheck="false"></div>`;
       }).join("");
+      list.querySelectorAll(".km-clear").forEach(b=>b.onclick=()=>{
+        const inp=list.querySelector(`input[data-k="${b.dataset.clear}"]`); if(!inp) return;
+        inp.value=""; inp.dataset.clear="1"; inp.placeholder="se borrará al guardar"; });
     }
     function applyKeyReveal(){ const show=$("km-show").checked;
       $("km-list").querySelectorAll("input[data-k]").forEach(inp=>{ if(inp.dataset.secret==="1") inp.type=show?"text":"password"; }); }
     async function saveKeys(){
       // Solo lo que el usuario cambió: los secretos llegan vacíos del servidor y vacío = "no tocar".
-      const body={}; $("km-list").querySelectorAll("input[data-k]").forEach(inp=>{ if(inp.value!==(inp.dataset.orig||"")) body[inp.dataset.k]=inp.value; });
+      const body={}; $("km-list").querySelectorAll("input[data-k]").forEach(inp=>{ if(inp.value!==(inp.dataset.orig||"") || (inp.dataset.clear==="1" && !inp.value)) body[inp.dataset.k]=inp.value; });
       if(!Object.keys(body).length){ $("km-msg").className=""; $("km-msg").textContent="Sin cambios."; return; }
       const msg=$("km-msg"); msg.className=""; msg.textContent="Guardando…";
       try{ const r=await (await fetch("/api/keys",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
-        if(r.ok){ msg.className="ok"; msg.textContent = (r.restart&&r.restart.length)
-          ? "Guardado ✓ — reinicia el servidor para: "+r.restart.join(", ") : "Guardado ✓ (activo ya)"; }
+        if(r.ok){ const txt = (r.restart&&r.restart.length)
+          ? "Guardado ✓ — reinicia el servidor para: "+r.restart.join(", ") : "Guardado ✓ (activo ya)";
+          await openKeys(); msg.className="ok"; msg.textContent=txt; }
         else { msg.className="err"; msg.textContent="Error: "+(r.error||"no se pudo guardar"); }
       }catch{ msg.className="err"; msg.textContent="Error de red"; }
     }
@@ -3442,7 +3450,7 @@
       } catch {}
       think.remove();
       if (d && d.b64) {
-        const src = d.b64.startsWith("data:") ? d.b64 : "data:image/png;base64," + d.b64;
+        const src = imgData(d.b64);
         const node = aiAppend("bot", "<img src='" + src + "' alt='generada'>" +
           "<a class='ai-dl' download='jarceye_ia.png' href='" + src + "'>⬇ Descargar</a> " +
           "<a class='ai-dl' data-act='rmmap' style='cursor:pointer'>🗺️ Quitar del mapa</a>" +
@@ -4197,7 +4205,7 @@
           `<div style="color:#8fb4cc">Tel ${i.phone} (ficticio)</div></div></div>`+
         `<div class="vd-t">IDENTIFICACIÓN</div>`+
         `<div class="vd-r"><span>Placa</span><span>${c.plate}</span></div>`+
-        `<div class="vd-r"><span>Etiqueta</span><span>${c.tag||("V"+c.num)}</span></div>`+
+        `<div class="vd-r"><span>Etiqueta</span><span>${esc(c.tag||("V"+c.num))}</span></div>`+
         `<div class="vd-r"><span>VIN</span><span>${i.vin}</span></div>`+
         `<div class="vd-t">VEHÍCULO</div>`+
         `<div class="vd-r"><span>Marca / Modelo</span><span>${i.make} ${i.model}</span></div>`+
@@ -4590,7 +4598,7 @@
       try{
         const r=await (await fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},
           body:JSON.stringify({prompt, negative:"wrong color, text, watermark, blurry, multiple cars, people", width:512, height:512, steps:8})})).json();
-        if(r&&r.b64){ const uri="data:image/png;base64,"+r.b64; _carPhotoCache.set(key,uri); c.photoIcon=uri; show(uri); }
+        if(r&&imgData(r.b64)){ const uri=imgData(r.b64); _carPhotoCache.set(key,uri); c.photoIcon=uri; show(uri); }
       }catch{}
     }
     function trackCar(c){   // añade c al rastreo y lo ENFOCA (vídeo + datos)
@@ -4753,7 +4761,7 @@
         `LAT <b>${d.lat.toFixed(6)}</b>&nbsp; LON <b>${d.lon.toFixed(6)}</b><br>`+
         `DIST <b>${fmtDist(d.dist)}</b>&nbsp; ELEV <b>${d.elev}</b><br>`+
         `AREA <b>${d.area}</b>&nbsp; AZ(t) <b>${d.az.toFixed(1)}°</b><br>`+
-        (spyAddr ? `ADDR <b>${spyAddr}</b><br>` : "")+
+        (spyAddr ? `ADDR <b>${esc(spyAddr)}</b><br>` : "")+
         `FRAME <b>${d.wpx}×${d.hpx}px</b>&nbsp; ${d.state}`;
     }
     function enterObjetivoUI(){ document.body.classList.add("ui-hidden","tools-hidden","objetivo-on");
@@ -4996,7 +5004,7 @@
       const gall=$("veh-gen-all"); if(gall) gall.onclick=async()=>{ gall.disabled=true; const n=Math.min(V.length,6);
         for(let i=0;i<n;i++){ await genVehicleModel(Vraw[i], i); } gall.disabled=false; };
       // Auto: en cuanto está el análisis, la IA produce la imagen HD de la zona (autos + estructuras).
-      if(img) generateViews(img, d);
+      if(img) generateViews(img, dRaw);
     }
     function cropThumb(el, bb){
       const iw=el.naturalWidth, ih=el.naturalHeight;
@@ -5041,7 +5049,7 @@
         const r=await (await fetch("/api/enhance",{method:"POST",headers:{"Content-Type":"application/json"},
           body:JSON.stringify({image:img,prompt})})).json();
         const el=$("lci-0");
-        if(r.b64) el.innerHTML=`<img src="data:image/png;base64,${r.b64}"><div class="cap">Zona realzada · alta resolución</div>`;
+        if(imgData(r.b64)) el.innerHTML=`<img src="${imgData(r.b64)}"><div class="cap">Zona realzada · alta resolución</div>`;
         else if(el) el.querySelector(".ph").textContent="no disponible";
       }catch{ const el=$("lci-0"); if(el) el.querySelector(".ph").textContent="error"; }
     }
@@ -5054,7 +5062,7 @@
       try{
         const r=await (await fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},
           body:JSON.stringify({prompt, negative:"wrong color, different color, text, watermark, blurry, deformed", width:768, height:512, steps:8})})).json();
-        if(r.b64) box.innerHTML=`<img class="vm-img" src="data:image/png;base64,${r.b64}" alt="${esc(color+' '+year+' '+make)}" title="${esc(color+' '+year+' '+make)}">`;
+        if(imgData(r.b64)) box.innerHTML=`<img class="vm-img" src="${imgData(r.b64)}" alt="${esc(color+' '+year+' '+make)}" title="${esc(color+' '+year+' '+make)}">`;
         else box.innerHTML=`<div class="vm-ph">no disponible${r&&r.error?(": "+esc(r.error)):""}</div>`;
       }catch{ box.innerHTML=`<div class="vm-ph">error de generación</div>`; }
     }
