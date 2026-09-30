@@ -52,7 +52,38 @@ _OVERPASS_EPS = [
     "https://overpass.private.coffee/api/interpreter",
     "https://overpass.osm.jp/api/interpreter",
 ]
-_overpass_cache: dict[str, tuple[float, list]] = {}
+_overpass_cache: dict[str, tuple[float, list, int]] = {}   # key -> (t, elementos, bytes)
+_ov_mem_bytes = 0
+_OVERPASS_MAX_RESP_BYTES = 32 * 1024 * 1024   # respuesta de red máxima (se corta antes de parsear)
+_OVERPASS_MAX_MEM_BYTES = 64 * 1024 * 1024    # presupuesto total de la caché en memoria
+
+
+async def _fetch_limited(method: str, url: str, limit: int, **kw) -> tuple[int, bytes | None]:
+    """Descarga en streaming y aborta si el cuerpo supera `limit` bytes (no se parsea nada gigante)."""
+    async with _http.stream(method, url, **kw) as r:
+        if r.status_code != 200:
+            return r.status_code, None
+        buf = bytearray()
+        async for chunk in r.aiter_bytes():
+            buf += chunk
+            if len(buf) > limit:
+                return r.status_code, None
+        return r.status_code, bytes(buf)
+
+
+def _ov_mem_put(key: str, now: float, els: list) -> None:
+    global _ov_mem_bytes
+    size = len(json.dumps(els))
+    if size > _OVERPASS_MAX_FILE_BYTES:
+        return
+    if len(_overpass_cache) >= 200 or _ov_mem_bytes + size > _OVERPASS_MAX_MEM_BYTES:
+        _overpass_cache.clear()
+        _ov_mem_bytes = 0
+    old = _overpass_cache.get(key)
+    if old:
+        _ov_mem_bytes -= old[2]
+    _overpass_cache[key] = (now, els, size)
+    _ov_mem_bytes += size
 # Caché EN DISCO: las calles no cambian; una vez traídas se reutilizan mucho tiempo,
 # evitando re-consultar Overpass y disparar su rate-limit.
 _OVERPASS_DIR = Path(__file__).resolve().parent.parent / ".cache" / "overpass"
@@ -66,7 +97,8 @@ def _ov_disk_path(query: str) -> Path:
 def _ov_disk_read(query: str) -> list | None:
     try:
         p = _ov_disk_path(query)
-        if p.exists() and (time.time() - p.stat().st_mtime) < _OVERPASS_TTL_DISK:
+        if p.exists() and (time.time() - p.stat().st_mtime) < _OVERPASS_TTL_DISK \
+                and p.stat().st_size <= _OVERPASS_MAX_FILE_BYTES:
             return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         pass
@@ -98,10 +130,11 @@ def _ov_disk_write(query: str, els: list) -> None:
 
 async def _overpass_one(ep: str, query: str, timeout: float) -> list | None:
     try:
-        r = await _http.post(ep, data={"data": query}, timeout=timeout)
-        if r.status_code != 200:
+        _st, body = await _fetch_limited("POST", ep, _OVERPASS_MAX_RESP_BYTES, data={"data": query},
+                                         timeout=timeout)
+        if body is None:
             return None
-        els = [e for e in (r.json().get("elements") or [])
+        els = [e for e in (json.loads(body).get("elements") or [])
                if e.get("geometry") and len(e["geometry"]) > 1]
         return els or None
     except Exception:
@@ -124,11 +157,12 @@ async def _osm_api_roads(query: str) -> list:
         return []
     s, w, n, e = (float(x) for x in m.groups())
     try:
-        r = await _http.get("https://api.openstreetmap.org/api/0.6/map",
-                            params={"bbox": f"{w},{s},{e},{n}"}, timeout=25)
-        if r.status_code != 200:
+        _st, body = await _fetch_limited("GET", "https://api.openstreetmap.org/api/0.6/map",
+                                         _OVERPASS_MAX_RESP_BYTES, params={"bbox": f"{w},{s},{e},{n}"},
+                                         timeout=25)
+        if body is None:
             return []
-        root = ET.fromstring(r.text)
+        root = ET.fromstring(body)
     except Exception:
         return []
     nodes: dict = {}
@@ -163,16 +197,14 @@ async def overpass_query(query: str, key: str = "") -> list:
         return []
     now = time.monotonic()
     if key and key in _overpass_cache:
-        t, els = _overpass_cache[key]
+        t, els, _size = _overpass_cache[key]
         if now - t < 300:
             return els
     # Caché en disco (por contenido de la consulta): sobrevive reinicios y evita rate-limit.
     disk = _ov_disk_read(query)
     if disk:
         if key:
-            if len(_overpass_cache) > 200:
-                _overpass_cache.clear()
-            _overpass_cache[key] = (now, disk)
+            _ov_mem_put(key, now, disk)
         return disk
     local = os.getenv("OVERPASS_URL", "").strip()
     result: list = []
@@ -198,9 +230,7 @@ async def overpass_query(query: str, key: str = "") -> list:
         _ov_fail = 0
         _ov_down_until = 0.0
         if key:
-            if len(_overpass_cache) > 200:
-                _overpass_cache.clear()
-            _overpass_cache[key] = (now, result)
+            _ov_mem_put(key, now, result)
         _ov_disk_write(query, result)
     return result
 

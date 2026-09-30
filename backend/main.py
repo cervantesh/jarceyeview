@@ -440,7 +440,8 @@ try:
 except ValueError:
     _MAX_BODY = 25 * 1024 * 1024
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
-_UI_PAGES = {"/", "/index.html", "/panel"}   # únicas rutas abribles desde un enlace de otra web
+_UI_PAGES = {"/", "/index.html", "/panel"}
+_BROWSER_ONLY_PREFIXES = ("/api/", "/tiles/")   # solo la propia página (fetch same-origin) las usa   # únicas rutas abribles desde un enlace de otra web
 
 
 def _hostname(hostport: str) -> str:
@@ -494,6 +495,12 @@ class LocalGuard:
             # Desde un enlace externo solo se puede ABRIR la app, no navegar a /api o /tiles.
             # Google Earth no envía Sec-Fetch-*.
             status, reason = 403, "petición cross-site no permitida"
+        elif scope["type"] == "http" and scope.get("path", "").startswith(_BROWSER_ONLY_PREFIXES) \
+                and headers.get("sec-fetch-site") not in ("same-origin", "none"):
+            # La API y los tiles solo los usa la propia página: exigir Sec-Fetch-Site same-origin
+            # (o "none" = URL escrita por ti). Un navegador sin Fetch Metadata + referrerpolicy=no-referrer
+            # ya no puede gastar tus APIs de pago. Google Earth usa solo /earth.kml y /flights.kml.
+            status, reason = 403, "petición sin origen propio verificable"
         elif "sec-fetch-site" not in headers and headers.get("referer") \
                 and urlsplit(headers["referer"]).netloc.lower() != headers.get("host", "").strip().lower():
             # Navegadores antiguos sin Fetch Metadata: un Referer de otra web delata una petición cross-site.
@@ -788,6 +795,8 @@ async def api_keys_set(payload: dict) -> JSONResponse:
         st = ln.strip()
         if st and not st.startswith("#") and "=" in st:
             k = st.split("=", 1)[0].strip()
+            if k.startswith("export ") or k.startswith("export\t"):
+                k = k[7:].strip()   # `export K=v` también es una asignación para python-dotenv
             if k in updates:
                 out.append(lines_new[k])
                 seen.add(k)
@@ -796,8 +805,16 @@ async def api_keys_set(payload: dict) -> JSONResponse:
     for k, v in updates.items():
         if k not in seen:
             out.append(lines_new[k])
+    text = "\n".join(out) + "\n"
+    # Antes de escribir: el .env resultante debe releerse con EXACTAMENTE los valores guardados
+    # (ninguna otra línea duplicada/posterior puede pisarlos al reiniciar).
+    parsed = dotenv_values(stream=io.StringIO(text), interpolate=False)
+    wrong = sorted(k for k, v in updates.items() if parsed.get(k) != v)
+    if wrong:
+        return JSONResponse({"ok": False, "error": f"{', '.join(wrong)}: otra línea del .env lo pisaría; "
+                             "edita el archivo a mano"}, status_code=409)
     try:
-        ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
+        ENV_PATH.write_text(text, encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status_code=500)
     for k, v in updates.items():

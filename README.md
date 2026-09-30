@@ -153,6 +153,8 @@ Recomendaciones:
   la clave viaja sin cifrar: está desactivado salvo que pongas `AVIATIONSTACK_ALLOW_HTTP=1`
   (hazlo solo en redes de confianza).
 - Desde un enlace de otra web solo se puede abrir la app (`/`, `/panel`), no las rutas `/api` ni `/tiles`.
+- `/api` y `/tiles` solo responden a la propia página (cabecera `Sec-Fetch-Site`). Requiere un navegador
+  actual (Chrome/Edge 76+, Firefox 90+, Safari 16.4+).
 - Otra web abierta en tu navegador no puede hacer peticiones a la app (se bloquean las peticiones
   *cross-site*, también los GET que gastarían cuota de tus APIs de pago).
 
