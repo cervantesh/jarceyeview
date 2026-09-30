@@ -483,9 +483,9 @@ class LocalGuard:
             return await self.app(scope, receive, send)
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
         path = scope.get("path", "")
-        root = scope.get("root_path", "")
-        if root and path.startswith(root):
-            path = path[len(root):] or "/"   # ruta efectiva para el enrutado, también tras un proxy con prefijo
+        root = scope.get("root_path", "").rstrip("/")
+        if root and (path == root or path.startswith(root + "/")):
+            path = path[len(root):] or "/"   # ruta efectiva (como Starlette: solo en límite de segmento)
         status, reason = 0, ""
         if _hostname(headers.get("host", "")) not in _ALLOWED_HOSTS:
             status, reason = 403, "host no permitido"
